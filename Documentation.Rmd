@@ -1,0 +1,57 @@
+---
+title: "Documentation"
+author: "Jared Norman"
+date: "21/02/2022"
+output: html_document
+---
+
+## JobR Description
+
+The purpose of this library is to manage the distribution and execution of embarrasingly parallel operations. The assumption is that your task is composable into many subtasks, where each task $i$ is executable through a single function $f:x_i\rightarrow y_i$. 
+
+If we have this model, we could send our code (including $f$) to a central server and have that server manage any client which wants to contribute to processing our workload by sending it some $x_i$ and once it has processed $y_i=f(x_i)$, storing it for later. Note that $x_i$ could be a scalar, a vector, a dataframe, or even many different parameters. The point is just that it is variable input given in the same structure and processed by the same function $f$.
+
+We could have it do cool stuff like send a message once everything has been processed, have an expected time for the work to be completed to inform some scheduling algorithm, log client ids/ip/mac, etc.
+
+## Simplifications we make for the MVP
+We should think how to indicate in a given project what $f$ is and how to manage storage of the $x_i$ and ensure they can be passed to $f$, etc. From there we can just zip the project and send to the server for dishing out to other clients. Client management can, down the line, be done in a more secure/loggable way. For now we just go for 0 security. 
+
+Another simplification we can make is that a server should only manage a single workload. This is going to make database table management simpler to begin with without having to store huge long format tables for each set of parameters.
+A simple way to manage $x_i$ is to say it needs to be a dataframe with only a single row where each column is numeric/character/logical but not nested/list/tibble. This fits very naturally into a database table. Similarly each $y_i$ could be a dataframe with a single row of unnested columns. 
+
+Given the above assumptions we need a table $\left[i, x_i\right]$ to store the input parameters, a table $\left[i, y_i\right]$ to store the output results, a table to monitor which parameters have been dished out (and when, and maybe even to who) and a table to monitor which parameters have been stored and when (and maybe even by who). 
+
+## Tables
+* `jobs`: parameter index and inputs $x_i$
+* `sent_jobs`: parameter index and checkout time
+* `received_jobs`: parameter index and checkin time
+* `results`: parameter index and results $y_i$
+
+<!-- TODO: Think more on generalising this structure to many projects -->
+
+## Usecase:
+When the server starts it will initially not be associated with any project. Once a client sends a zipfile to the `/project/new` endpoint it will store the zip file on disk and unzip it adjacently. Then it checks for the required input/output structure and sets up the empty database with all 4 tables and responds to the client that everything is ok and some information about the project. When the client hits the `/project/{projectID}/setParms` endpoint the new parameters are set in the `jobs` table. 
+Some client hits the `/project/list` endpoint and gets a list of current project ids together with their names. When a client hits the `/project/{projectID}/download` endpoint the zipfile is downloaded containing all code needed to run the jobs. When a client hits the `/project/getParms` endpoint the server responds with a single set of parameters together with the `parmID`. The client then processes the job and once done it hits the `/project/{projectID}/solve/{parmID}` endpoint the result is stored and the server returns 200.
+We have thus identified the following endpoints:
+* `/project/new`
+* `/project/{projectID}/setParms`
+* `/project/list` 
+* `/project/{projectID}/download`  
+* `/project/getParms`
+* `/project/{projectID}/solve/{parmID}`
+
+## Roadmap:
+### We need a server:
+Mostly this is a plumberAPI over some database code. Need to consider async implications of plumberAPI.
+
+1. plumberAPI with echo endpoint
+2. implement database code to create a new table with a primary key
+3. function to consume a zip from client, verify it, and identify the relevant DB schema from it
+4. functions to write the four tables given the relevant raw R objects
+5. implement the six endpoints
+
+### We need a client:
+Can make requests to server and work within the system using a R API.
+
+1. code to handle the conversion of a project into the jobR format
+2. implement the clientside API
