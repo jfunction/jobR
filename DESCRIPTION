@@ -1,11 +1,14 @@
 Package: jobR
 Type: Package
-Title: What the Package Does (Title Case)
+Title: Fully manage distribution of embarrasingly parallel tasks
 Version: 0.1.0
-Author: Who wrote it
-Maintainer: The package maintainer <yourself@somewhere.net>
-Description: More about what it does (maybe more than one line)
-    Use four spaces when indenting paragraphs within the Description.
-License: What license is it under?
+Author: Jared Norman
+Maintainer: Jared Norman <jarednorman@hotmail.com>
+Description: Given a function needs to map many jobs, a plumberAPI based
+    server handles management of parameter sets being sent to one or more
+    clients which process these through a function and return the result.
+    The server stores the results and makes them available once complete.
+License: MIT + file LICENSE
 Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
 LazyData: true
