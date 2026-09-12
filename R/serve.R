@@ -174,6 +174,11 @@ handle_request <- function(state, req, now = unix_time()) {
 #' @param tls Optional `tlsConfig` from [host_credentials()].
 #' @param timeout_ms How long to block waiting for each request.
 #' @param max_seconds Stop after this long regardless of progress.
+#' @param ready_file Optional path written once the socket is actually bound,
+#'   and removed on exit. Supervisors and tests need an observable readiness
+#'   signal: dialling cannot provide one, because nanonext connects
+#'   asynchronously and a dial to an address with nothing behind it succeeds
+#'   just as readily as a dial to a live host.
 #' @param quiet Suppress progress output.
 #'
 #' @return The host state, invisibly.

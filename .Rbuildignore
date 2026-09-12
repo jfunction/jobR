@@ -4,3 +4,12 @@
 ^\.Rproj\.user$
 ^LICENSE\.md$
 ^data-raw$
+^misc$
+^projects$
+^Documentation\.(Rmd|html)$
+^sampleSession\.R$
+^.*\.xlsx$
+^~\$.*$
+^server\.sqlite$
+^\.Rhistory$
+^\.github$

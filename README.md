@@ -95,11 +95,41 @@ it is talking to the host it expects.
 
 **Workers are not authenticated by certificate.** The original design called for
 mutual TLS, and `nanonext::tls_config()` exposes an `auth` argument that looks
-like it should provide it. On nanonext 1.6.1 a listener configured with
-`auth = TRUE` rejected every client tested, including ones presenting a
-certificate from the CA that listener itself held. So client-certificate
-authentication is not available through the public API today, and the passphrase
-carries that weight instead.
+like it should provide it:
+
+> If TRUE, the session is only allowed to proceed if the peer has presented a
+> certificate and it has been validated.
+
+It does not, and the reason is structural rather than a bug. `tls_config()` is
+either/or — a config is *either* a client config (holding a CA, to verify the
+server it connects to) *or* a server config (holding its own certificate and
+key). Passing both arguments silently yields a **client** config:
+
+```r
+tls_config(server = cert$server, auth = TRUE)
+#> < TLS server config | auth mode: required >
+tls_config(client = cert$client, server = cert$server, auth = TRUE)
+#> < TLS client config | auth mode: required >     # the listener identity is gone
+```
+
+So a listener can be told to *require* a peer certificate, but there is no way
+to also give it a CA to *validate* that certificate against. Require-but-cannot-
+validate rejects everyone. Measured matrix, identical on nanonext 1.6.1 and
+1.10.2 (current at time of writing):
+
+| listener | client | result |
+|---|---|---|
+| `auth = FALSE` | CA only | connects |
+| `auth = TRUE` | no certificate | blocked (correct) |
+| `auth = TRUE` | certificate from the listener's own CA | **blocked** |
+| `auth = TRUE` | unrelated certificate | blocked (correct) |
+
+The nanonext changelog has no entry about client-certificate authentication or
+peer verification on listeners, and the configuration vignette shows no example
+of a listener verifying a client. This looks like a capability the API does not
+expose rather than one that regressed, and it is worth raising upstream.
+
+Until then the passphrase carries that weight.
 
 The practical consequence: anyone who obtains the passphrase can contribute work
 and read the jobs they are handed. That is fine among colleagues. It is not a

@@ -22,6 +22,9 @@ NULL
 #' @param tls Optional `tlsConfig` for verifying the host.
 #' @param cores Local cores to use per chunk. 1 runs serially.
 #' @param timeout_ms Per-request timeout.
+#' @param poll_seconds How long to wait before asking again when every chunk is
+#'   currently leased to another worker. Leases lapse, so this is a pause, not
+#'   a reason to stop.
 #' @param max_chunks Stop after contributing this many chunks. Lets a machine
 #'   donate a bounded amount of work rather than staying until the jobset ends.
 #' @param max_seconds Give up after this long.
