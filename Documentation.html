@@ -179,24 +179,98 @@ pre code {
 </div>
 <div id="simplifications-we-make-for-the-mvp" class="section level2">
 <h2>Simplifications we make for the MVP</h2>
-<p>We should think how to indicate in a given project what <span class="math inline">\(f\)</span> is and how to manage storage of the <span class="math inline">\(x_i\)</span> and ensure they can be passed to <span class="math inline">\(f\)</span>, etc. From there we can just zip the project and send to the server for dishing out to other clients. Client management can, down the line, be done in a more secure/loggable way. For now we just go for 0 security.</p>
-<p>Another simplification we can make is that a server should only manage a single workload. This is going to make database table management simpler to begin with without having to store huge long format tables for each set of parameters. A simple way to manage <span class="math inline">\(x_i\)</span> is to say it needs to be a dataframe with only a single row where each column is numeric/character/logical but not nested/list/tibble. This fits very naturally into a database table. Similarly each <span class="math inline">\(y_i\)</span> could be a dataframe with a single row of unnested columns.</p>
-<p>Given the above assumptions we need a table <span class="math inline">\(\left[i, x_i\right]\)</span> to store the input parameters, a table <span class="math inline">\(\left[i, y_i\right]\)</span> to store the output results, a table to monitor which parameters have been dished out (and when, and maybe even to who) and a table to monitor which parameters have been stored and when (and maybe even by who).</p>
+<p>We will need to incorporate permissions but for the MVP we don’t need to actually implement all of that.</p>
+<p>We don’t need to store <span class="math inline">\(x_i\)</span> and <span class="math inline">\(y_i\)</span> in a database, but rather can store these (tibbles) in <code>.rds</code> files which are tracked in the database. Then the database just needs to store information using the indices into the tibbles as unique identifiers. I think this approach saves a lot of potential headaches around database management and keeps some nice separation. The server should take in a working directory and when in use this directory looks like this:</p>
+<ul>
+<li><code>server.sqlite</code></li>
+<li><code>projects/</code>
+<ul>
+<li><code>{projectName}/</code>
+<ul>
+<li><code>project.sqlite</code></li>
+<li><code>{projectName}.zip</code></li>
+<li><code>jobsetParams/</code>
+<ul>
+<li><code>{jobsetGUID}.rds</code></li>
+</ul></li>
+<li><code>jobsetResults/</code>
+<ul>
+<li><code>{jobsetGUID}/</code>
+<ul>
+<li><code>01.rds</code></li>
+<li><code>02.rds</code></li>
+<li><code>...</code></li>
+<li><code>NN.rds</code></li>
+</ul></li>
+</ul></li>
+</ul></li>
+</ul></li>
+</ul>
+<p>Initially the <code>server.sqlite</code> database just has a users database with 1 entry for the server admin who has ultimate power. Each project then has its own <code>project.sqlite</code> data base with a <code>users</code> table to keep track of who is allowed to process what. Later the client creating the project (project owner) will require a token derived by the server admin. Also they will be able to derive and issue jobset processing tokens to other clients.</p>
+<p>Each project will need to have a jobR.R file which is responsible for sourcing all the code needed for a job runner to run a job. It will also need to implement a function <code>runJob(df)</code> which takes in the row of some jobset tibble and returns some response tibble. The response tibble will then be sent to the server.</p>
+<p>We can set up a bunch of runs in a “jobset” which is simply a dataframe wherein each row is some <span class="math inline">\(x_i\)</span> parameters to run. Each jobset has a set chunksize and is represented by a <code>.rds</code> file in the <code>jobsetParams/</code> directory as well as in the <code>jobsets</code> table where the <code>chunksize</code> is given in a column also. We can also monitor the status of jobsets by having a <code>job_events</code> table in our <code>project.sqlite</code> database. We have opted for snake_case as much as possible for the sqlite databases to keep things simple.</p>
 </div>
 <div id="tables" class="section level2">
 <h2>Tables</h2>
 <ul>
-<li><code>jobs</code>: parameter index and inputs <span class="math inline">\(x_i\)</span></li>
-<li><code>sent_jobs</code>: parameter index and checkout time</li>
-<li><code>received_jobs</code>: parameter index and checkin time</li>
-<li><code>results</code>: parameter index and results <span class="math inline">\(y_i\)</span></li>
+<li><code>users</code>: <code>user_id</code>, <code>user_secret</code>, <code>user_name</code>, <code>created</code></li>
+<li><code>jobsets</code>: <code>jobset_id</code>, <code>guid</code>, <code>num_jobs</code>, <code>chunksize</code>, <code>comment</code>, <code>created</code></li>
+<li><code>events</code>: <code>event_id</code>, <code>user_token</code>, <code>jobset_guid</code>, <code>jobset_chunk_index</code>, <code>event_type</code>, <code>timestamp</code></li>
 </ul>
 <!-- TODO: Think more on generalising this structure to many projects -->
 </div>
 <div id="usecase" class="section level2">
 <h2>Usecase:</h2>
-<p>When the server starts it will initially not be associated with any project. Once a client sends a zipfile to the <code>/project/new</code> endpoint it will store the zip file on disk and unzip it adjacently. Then it checks for the required input/output structure and sets up the empty database with all 4 tables and responds to the client that everything is ok and some information about the project. When the client hits the <code>/project/{projectID}/setParms</code> endpoint the new parameters are set in the <code>jobs</code> table. Some client hits the <code>/project/list</code> endpoint and gets a list of current project ids together with their names. When a client hits the <code>/project/{projectID}/download</code> endpoint the zipfile is downloaded containing all code needed to run the jobs. When a client hits the <code>/project/getParms</code> endpoint the server responds with a single set of parameters together with the <code>parmID</code>. The client then processes the job and once done it hits the <code>/project/{projectID}/solve/{parmID}</code> endpoint the result is stored and the server returns 200. We have thus identified the following endpoints: * <code>/project/new</code> * <code>/project/{projectID}/setParms</code> * <code>/project/list</code> * <code>/project/{projectID}/download</code><br />
-* <code>/project/getParms</code> * <code>/project/{projectID}/solve/{parmID}</code></p>
+<div id="server-owner" class="section level3">
+<h3>Server owner</h3>
+<p>When the server starts it will initially not be associated with any project and the server owner will get a secret token which can be used for supreme power.</p>
+</div>
+<div id="project-owner" class="section level3">
+<h3>Project Owner</h3>
+<p>Once a client sends a zipfile to the <code>/projects/new</code> endpoint it will setup a directory/database for the project and store the zip file on disk. When the client hits the <code>/projects/{projectID}/jobsets/new</code> endpoint the new parameters are set in the <code>jobsets</code> table. At any time the project owner can inspect the status using the <code>/projects/{projectID}/events</code> endpoint which lets them know what has been processed and by who. The <code>/projects/{projectID}/jobsets/{jobsetGUID}/events</code> endpoint filters the event data by <code>jobsetGUID</code>.</p>
+</div>
+<div id="job-processing" class="section level3">
+<h3>Job processing</h3>
+<p>Some client hits the <code>/projects</code> endpoint and gets a list of current project names. When a client hits the <code>/projects/{projectID}/download</code> endpoint the zipfile is downloaded containing all code needed to run the jobs. When a client hits the <code>/projects/{projectID}/jobsets</code> endpoint the server responds with jobsets which are set to be processed together with some other useful information. After the client hits the <code>/projects/{projectID}/jobsets/{jobsetGUID}</code> endpoint a chunk id is returned. The client then processes the parameters in this chunk and once done it hits the <code>/projects/{projectID}/jobsets/{jobsetGUID}</code> endpoint with a post .rds file, the file is stored in the <code>{jobsetGUID}/jobsetResults/</code> directory and the server returns 200.</p>
+</div>
+<div id="summary" class="section level3">
+<h3>Summary</h3>
+<p>We have thus identified the following endpoints:</p>
+<ul>
+<li><code>/projects</code>
+<ul>
+<li>list projects</li>
+</ul></li>
+<li><code>/projects/new</code>
+<ul>
+<li>upload project zipfile and make new project</li>
+</ul></li>
+<li><code>/projects/{projectID}/download</code>
+<ul>
+<li>download project zipfile</li>
+</ul></li>
+<li><code>/projects/{projectID}/jobsets</code>
+<ul>
+<li>list jobsets</li>
+</ul></li>
+<li><code>/projects/{projectID}/jobsets/new</code>
+<ul>
+<li>create jobset from rds</li>
+</ul></li>
+<li><code>/projects/{projectID}/jobsets/{jobsetGUID}</code>
+<ul>
+<li>get chunk index to process or post rds results for chunk index</li>
+</ul></li>
+<li><code>/projects/{projectID}/jobsets/{jobsetGUID}/events</code>
+<ul>
+<li>list events associated with this jobset</li>
+</ul></li>
+<li><code>/projects/{projectID}/events</code>
+<ul>
+<li>list project events</li>
+</ul></li>
+</ul>
+</div>
 </div>
 <div id="roadmap" class="section level2">
 <h2>Roadmap:</h2>

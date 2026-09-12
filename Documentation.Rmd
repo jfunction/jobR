@@ -7,51 +7,102 @@ output: html_document
 
 ## JobR Description
 
-The purpose of this library is to manage the distribution and execution of embarrasingly parallel operations. The assumption is that your task is composable into many subtasks, where each task $i$ is executable through a single function $f:x_i\rightarrow y_i$. 
+The purpose of this library is to manage the distribution and execution of embarrasingly parallel operations. The assumption is that your workload is decomposable into many subtasks taking in parameters $x_i$ and each subtask $i$ is executable through a single function $f:x_i\rightarrow y_i$.
 
-If we have this model, we could send our code (including $f$) to a central server and have that server manage any client which wants to contribute to processing our workload by sending it some $x_i$ and once it has processed $y_i=f(x_i)$, storing it for later. Note that $x_i$ could be a scalar, a vector, a dataframe, or even many different parameters. The point is just that it is variable input given in the same structure and processed by the same function $f$.
+If our workload fits into this framework, we could send our code (ie, $f$ and $x_i$) to a central server and have that server manage any client which wants to contribute to calculating $y_i=f(x_i)$. Note that $x_i$ could be a scalar, a vector, a dataframe, or any other R object. The point is just that it is variable input given in the same structure and processed by the same function $f$.
 
-We could have it do cool stuff like send a message once everything has been processed, have an expected time for the work to be completed to inform some scheduling algorithm, log client ids/ip/mac, etc.
+One question I asked myself while designing this was around multiprocessing capabilities on a single machine. JobR will be a client-server model with the server essentially just ensuring that clients get the right stuff to process and their results get put in the right place. The clients themselves are conceptually each their own machine but they could still capitalize on multiprocessing since the workload is already embarrassingly parallel. The question then becomes whether we have one client grab multiple workloads or if we have each workload be further decomposable. The former seems preferable since each client can then control their batch size - eg they can ask for up to 100 subtasks or up to 10 subtasks and get that many $x_i$ back. Some issues can occur pertaining to scheduling. If a client asks for too many $x_i$ the system could farm them all out to that client and other clients may end up being unused - or if the server sends the same $x_i$ to multiple clients this could result in unnecessary time spend on computation. If the client asks for one task in each thread, there would be many simultaneous requests and JobR would need to be able to support this usecase.
+
+We could include other features such as sending a message once everything has been processed, estimating and ETA for the work to be completed to inform some scheduling algorithm, logging which clients processed which subtask and so on, etc.
 
 ## Simplifications we make for the MVP
-We should think how to indicate in a given project what $f$ is and how to manage storage of the $x_i$ and ensure they can be passed to $f$, etc. From there we can just zip the project and send to the server for dishing out to other clients. Client management can, down the line, be done in a more secure/loggable way. For now we just go for 0 security. 
 
-Another simplification we can make is that a server should only manage a single workload. This is going to make database table management simpler to begin with without having to store huge long format tables for each set of parameters.
-A simple way to manage $x_i$ is to say it needs to be a dataframe with only a single row where each column is numeric/character/logical but not nested/list/tibble. This fits very naturally into a database table. Similarly each $y_i$ could be a dataframe with a single row of unnested columns. 
+We will need to incorporate permissions but for the MVP we don't need to actually implement all of that.
 
-Given the above assumptions we need a table $\left[i, x_i\right]$ to store the input parameters, a table $\left[i, y_i\right]$ to store the output results, a table to monitor which parameters have been dished out (and when, and maybe even to who) and a table to monitor which parameters have been stored and when (and maybe even by who). 
+We don't need to store $x_i$ and $y_i$ in a database, but rather can store these (tibbles) in `.rds` files which are tracked in the database. Then the database just needs to store references to the tibbles and scheduling related information. I think this approach saves a lot of potential headaches around database management and keeps some nice separation. The server should take in a working directory and when in use this directory looks like this:
+
+-   `server.sqlite`
+-   `projects/`
+    -   `{projectName}/`
+        -   `project.sqlite`
+        -   `{projectName}.zip`
+        -   `jobsetParams/`
+            -   `{jobsetGUID}.rds`
+        -   `jobsetResults/`
+            -   `{jobsetGUID}/`
+                -   `01.rds`
+                -   `02.rds`
+                -   `...`
+                -   `NN.rds`
+
+Initially the `server.sqlite` database just has a users table with 1 entry for the server admin who has full permission. Each project then has its own `project.sqlite` data base with a `users` table to keep track of who is allowed to process what. Later the client creating the project (project owner) will require a token derived by the server admin. Also they will be able to derive and issue jobset processing tokens to other clients.
+
+Each project will need to have a `jobR.R` file which is responsible for sourcing all the code needed for a job runner to run a job. It will also need to implement a function `runJob(df)` which takes in the row of some jobset tibble and returns some response tibble. The response tibble will then be sent to the server.
+
+We can set up a bunch of runs in a "jobset" which is simply a dataframe wherein each row is some $x_i$ parameters to run. Each jobset has a set chunksize and is represented by a `.rds` file in the `jobsetParams/` directory as well as in the `jobsets` table where the `chunksize` is given in a column also. We can also monitor the status of jobsets by having a `job_events` table in our `project.sqlite` database. We have opted for snake_case as much as possible for the sqlite databases to keep things simple.
 
 ## Tables
-* `jobs`: parameter index and inputs $x_i$
-* `sent_jobs`: parameter index and checkout time
-* `received_jobs`: parameter index and checkin time
-* `results`: parameter index and results $y_i$
+
+-   `users`: `user_id`, `user_secret`, `user_name`, `created`
+-   `jobsets`: `jobset_id`, `guid`, `num_jobs`, `chunksize`, `comment`, `created`
+-   `events`: `event_id`, `user_token`, `jobset_guid`, `jobset_chunk_index`, `event_type`, `timestamp`
 
 <!-- TODO: Think more on generalising this structure to many projects -->
 
+## Working directory
+
+Taking a page out of `rsconnect`s book I decided to create a config.R which holds a central working directory.
+
 ## Usecase:
-When the server starts it will initially not be associated with any project. Once a client sends a zipfile to the `/project/new` endpoint it will store the zip file on disk and unzip it adjacently. Then it checks for the required input/output structure and sets up the empty database with all 4 tables and responds to the client that everything is ok and some information about the project. When the client hits the `/project/{projectID}/setParms` endpoint the new parameters are set in the `jobs` table. 
-Some client hits the `/project/list` endpoint and gets a list of current project ids together with their names. When a client hits the `/project/{projectID}/download` endpoint the zipfile is downloaded containing all code needed to run the jobs. When a client hits the `/project/getParms` endpoint the server responds with a single set of parameters together with the `parmID`. The client then processes the job and once done it hits the `/project/{projectID}/solve/{parmID}` endpoint the result is stored and the server returns 200.
+
+### Server owner
+
+When the server starts it will initially not be associated with any project and the server owner will get a secret token which can be used for supreme power.
+
+### Project Owner
+
+Once a client sends a zipfile to the `/projects/new` endpoint it will setup a directory/database for the project and store the zip file on disk. When the client hits the `/projects/{projectID}/jobsets/new` endpoint the new parameters are set in the `jobsets` table. At any time the project owner can inspect the status using the `/projects/{projectID}/events` endpoint which lets them know what has been processed and by who. The `/projects/{projectID}/jobsets/{jobsetGUID}/events` endpoint filters the event data by `jobsetGUID`.
+
+### Job processing
+
+Some client hits the `/projects` endpoint and gets a list of current project names. When a client hits the `/projects/{projectID}/download` endpoint the zipfile is downloaded containing all code needed to run the jobs. When a client hits the `/projects/{projectID}/jobsets` endpoint the server responds with jobsets which are set to be processed together with some other useful information. After the client hits the `/projects/{projectID}/jobsets/{jobsetGUID}` endpoint a chunk id is returned. The client then processes the parameters in this chunk and once done it hits the `/projects/{projectID}/jobsets/{jobsetGUID}` endpoint with a post .rds file, the file is stored in the `{jobsetGUID}/jobsetResults/` directory and the server returns 200.
+
+### Summary
+
 We have thus identified the following endpoints:
-* `/project/new`
-* `/project/{projectID}/setParms`
-* `/project/list` 
-* `/project/{projectID}/download`  
-* `/project/getParms`
-* `/project/{projectID}/solve/{parmID}`
+
+-   `/projects`
+    -   list projects
+-   `/projects/new`
+    -   upload project zipfile and make new project
+-   `/projects/{projectID}/download`
+    -   download project zipfile
+-   `/projects/{projectID}/jobsets`
+    -   list jobsets
+-   `/projects/{projectID}/jobsets/new`
+    -   create jobset from rds
+-   `/projects/{projectID}/jobsets/{jobsetGUID}`
+    -   get chunk index to process or post rds results for chunk index
+-   `/projects/{projectID}/jobsets/{jobsetGUID}/events`
+    -   list events associated with this jobset
+-   `/projects/{projectID}/events`
+    -   list project events
 
 ## Roadmap:
+
 ### We need a server:
+
 Mostly this is a plumberAPI over some database code. Need to consider async implications of plumberAPI.
 
-1. plumberAPI with echo endpoint
-2. implement database code to create a new table with a primary key
-3. function to consume a zip from client, verify it, and identify the relevant DB schema from it
-4. functions to write the four tables given the relevant raw R objects
-5. implement the six endpoints
+1.  plumberAPI with echo endpoint
+2.  implement database code to create a new table with a primary key
+3.  function to consume a zip from client, verify it, and identify the relevant DB schema from it
+4.  functions to write the four tables given the relevant raw R objects
+5.  implement the six endpoints
 
 ### We need a client:
+
 Can make requests to server and work within the system using a R API.
 
-1. code to handle the conversion of a project into the jobR format
-2. implement the clientside API
+1.  code to handle the conversion of a project into the jobR format
+2.  implement the clientside API

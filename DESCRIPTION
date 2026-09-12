@@ -12,3 +12,18 @@ License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 LazyData: true
+Imports: 
+    magrittr,
+    plumber,
+    tibble,
+    DBI,
+    RSQLite,
+    rappdirs,
+    zip,
+    random
+RoxygenNote: 7.1.2
+Suggests: 
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
+Depends: 
+    R (>= 2.10)
