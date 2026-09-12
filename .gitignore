@@ -7,3 +7,7 @@
 server.sqlite
 ~$*.xlsx
 .Rhistory
+
+# build artefacts
+*.tar.gz
+*.Rcheck/
