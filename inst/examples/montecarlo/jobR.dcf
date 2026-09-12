@@ -1,0 +1,3 @@
+Project: montecarlo
+Entrypoint: R/run.R
+Files: R/run.R, R/estimate.R

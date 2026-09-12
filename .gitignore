@@ -2,3 +2,8 @@
 .Rhistory
 .RData
 .Ruserdata
+
+# stray local artefacts
+server.sqlite
+~$*.xlsx
+.Rhistory

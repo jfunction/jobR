@@ -1,29 +1,32 @@
 Package: jobR
 Type: Package
-Title: Fully manage distribution of embarrasingly parallel tasks
-Version: 0.1.0
-Author: Jared Norman
-Maintainer: Jared Norman <jarednorman@hotmail.com>
-Description: Given a function needs to map many jobs, a plumberAPI based
-    server handles management of parameter sets being sent to one or more
-    clients which process these through a function and return the result.
-    The server stores the results and makes them available once complete.
+Title: Distribute Embarrassingly Parallel Work Across Machines You Already Have
+Version: 0.2.0
+Authors@R: person("Jared", "Norman", email = "jarednorman@hotmail.com",
+                  role = c("aut", "cre"))
+Description: Runs a batch of independent jobs across whatever machines are to
+    hand -- a few laptops on a LAN, or colleagues in other countries -- with no
+    cloud account, no scheduler and no paid service. A host holds the jobs and
+    an append-only ledger; workers join with a spoken passphrase, fetch the
+    project bundle only when it has changed, and pull chunks until the work is
+    done. Chunks are leased rather than merely sent, so a worker that loses
+    power or closes its lid has its work reissued automatically, and both host
+    and workers can restart without losing progress.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-LazyData: true
-Imports: 
-    magrittr,
-    plumber,
-    tibble,
-    DBI,
-    RSQLite,
-    rappdirs,
-    zip,
-    random
 RoxygenNote: 7.1.2
-Suggests: 
-    testthat (>= 3.0.0)
+Depends:
+    R (>= 4.0)
+Imports:
+    nanonext,
+    digest,
+    zip
+Suggests:
+    mirai,
+    testthat (>= 3.0.0),
+    callr,
+    withr,
+    renv
 Config/testthat/edition: 3
-Depends: 
-    R (>= 2.10)
+LazyData: true
