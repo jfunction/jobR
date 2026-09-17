@@ -136,3 +136,43 @@ test_that("missing packages are reported before work is accepted", {
   expect_false("stats" %in% miss)
   expect_equal(packages_missing(character()), character())
 })
+
+# ---- comments in manifests --------------------------------------------------
+# read.dcf() has no comment syntax, so manifest_read() strips them first. The
+# shipped templates are heavily commented, and every example project would have
+# been unreadable to the parser without this.
+
+test_that("comments and surrounding blank lines are ignored", {
+  d <- tempfile("proj-"); dir.create(file.path(d, "R"), recursive = TRUE)
+  writeLines("run_job <- function(row) row$x", file.path(d, "R", "run.R"))
+  writeLines(c("# what this project is",
+               "#   Project: not-this-one",
+               "",
+               "Project: commented",
+               "Entrypoint: R/run.R",
+               "# a comment between fields",
+               "Files: R/run.R"),
+             file.path(d, "jobR.dcf"))
+
+  man <- manifest_read(d)
+  expect_equal(man$project, "commented")
+  expect_equal(man$files, "R/run.R")
+})
+
+test_that("a manifest that is only comments is an error, not a silent pass", {
+  d <- tempfile("proj-"); dir.create(d, recursive = TRUE)
+  writeLines(c("# nothing here", "# but comments"), file.path(d, "jobR.dcf"))
+  expect_error(manifest_read(d))
+})
+
+test_that("a hash is unaffected by editing the manifest's comments", {
+  d <- tempfile("proj-"); dir.create(file.path(d, "R"), recursive = TRUE)
+  writeLines("run_job <- function(row) row$x", file.path(d, "R", "run.R"))
+  base <- c("Project: p", "Entrypoint: R/run.R", "Files: R/run.R")
+  writeLines(base, file.path(d, "jobR.dcf"))
+  h1 <- manifest_read(d)
+
+  writeLines(c("# added a comment", base), file.path(d, "jobR.dcf"))
+  h2 <- manifest_read(d)
+  expect_equal(h1, h2)
+})

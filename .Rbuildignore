@@ -12,4 +12,5 @@
 ^~\$.*$
 ^server\.sqlite$
 ^\.Rhistory$
-^\.github$
+^.github$
+^HOME-TEST.md$

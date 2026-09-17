@@ -3,9 +3,8 @@
 # Project    a short name; becomes the directory workers unpack into
 # Entrypoint the one file that defines run_job(); must appear in Files
 # Files      everything that travels to the workers, comma separated.
-#            Nothing travels unless it is listed here -- note that
-#            R/estimate.R only reaches the workers because it is listed.
+#            Nothing travels unless it is listed here.
 
-Project: montecarlo
+Project: benchmark
 Entrypoint: R/run.R
-Files: R/run.R, R/estimate.R
+Files: R/run.R, R/burn.R

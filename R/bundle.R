@@ -30,7 +30,7 @@ manifest_read <- function(dir) {
   if (!file.exists(path)) {
     stop("no ", MANIFEST_FILE, " found in ", dir, call. = FALSE)
   }
-  d <- read.dcf(path)
+  d <- read.dcf(textConnection(manifest_strip_comments(readLines(path, warn = FALSE))))
   field <- function(name, required = TRUE) {
     if (!name %in% colnames(d)) {
       if (required) stop(MANIFEST_FILE, " is missing required field: ", name, call. = FALSE)
@@ -63,6 +63,17 @@ manifest_read <- function(dir) {
     files      = files,
     lockfile   = field("Lockfile", required = FALSE)
   )
+}
+
+# DCF has no comment syntax, but a manifest that cannot explain itself is a
+# manifest people guess at. Comment lines are stripped before parsing, along
+# with any blank lines they leave at the top -- a leading blank would otherwise
+# read as an empty first record.
+manifest_strip_comments <- function(lines) {
+  lines <- lines[!grepl("^\\s*#", lines)]
+  first <- which(nzchar(trimws(lines)))
+  if (!length(first)) return(character())
+  lines[seq(min(first), length(lines))]
 }
 
 #' Content hash for a set of project files

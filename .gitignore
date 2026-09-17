@@ -1,13 +1,24 @@
+# R session / IDE state
 .Rproj.user
 .Rhistory
 .RData
 .Ruserdata
 
-# stray local artefacts
-server.sqlite
-~$*.xlsx
-.Rhistory
+# renv is no longer used: DESCRIPTION declares dependencies directly, and
+# renv belongs to projects rather than packages. Left on disk so nothing is
+# lost -- delete the renv/ directory to reclaim the space.
+renv/
+renv.lock
 
 # build artefacts
 *.tar.gz
 *.Rcheck/
+
+# superseded scratch from the 2022 prototype, kept on disk but not tracked
+misc/
+sampleSession.R
+
+# unrelated local files
+server.sqlite
+*.xlsx
+~$*.xlsx

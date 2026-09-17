@@ -63,16 +63,65 @@ will reliably stay alive and everyone already has the packages, plain `mirai` is
 simpler and faster. jobR earns its place when workers are unreliable and the
 people running them should not have to be told what to install.
 
+## Trying it on two machines
+
+[`HOME-TEST.md`](HOME-TEST.md) is a step-by-step walkthrough for the simplest
+real deployment — two laptops on a home network — including the two things that
+actually go wrong (listening on `127.0.0.1`, and the host firewall dropping
+connections silently).
+
+The package will tell you most of it itself:
+
+```r
+jobR::jobr_doctor()      # on the host: your LAN addresses, is the port free, firewall command
+jobR::jobr_ping(url)     # on the worker: is this a network problem or a passphrase problem
+```
+
+There is a calibrated workload in `inst/examples/benchmark` whose runtime you
+can predict, so you can tell a real speedup from a fast machine:
+
+```r
+jobR::jobr_estimate(n = 240, seconds = 1, cores = c(laptop_a = 4, laptop_b = 4))
+#> total work    : 240 jobs x 1s = 240 CPU-seconds
+#> one core alone: 240s (4 min)
+#> across 8 cores: ~30s  (perfect scaling; expect a little more)
+```
+
+Every result records which machine computed it, so afterwards:
+
+```r
+jobR::jobr_benchmark_report(host_results(h))
+#>      host jobs cpu_seconds share
+#> 1 laptop-b  128       128.4 0.533
+#> 2 laptop-a  112       112.1 0.467
+```
+
 ## Setting up a project
 
-A project is a directory with a `jobR.dcf` manifest:
+A project is an ordinary directory with a `jobR.dcf` manifest. Run
+`?jobR.dcf` for the full reference, or scaffold one — it writes a commented
+manifest and a stub entrypoint:
+
+```r
+jobR::jobr_new_project("~/mysim")
+jobR::jobr_check_project("~/mysim")   # validates before anyone else has to find out
+```
+
+The manifest looks like this — plain `Field: value`, the same format as a
+package `DESCRIPTION`:
 
 ```
-Project: mysim
-Entrypoint: R/run.R
+Project: mysim              # names the directory workers unpack into
+Entrypoint: R/run.R         # the one file defining run_job(); must be in Files
 Files: R/run.R, R/helpers.R, data/lookup.csv
-Lockfile: renv.lock
+Lockfile: renv.lock         # optional; workers refuse to start if short a package
 ```
+
+`Files` is exhaustive: **nothing travels unless it is listed**, so a stray 2 GB
+CSV sitting in the project folder cannot be accidentally shipped to four
+machines. Comments are supported, though DCF itself has no comment syntax —
+jobR strips them before parsing, because a manifest that cannot explain itself
+is a manifest people guess at.
 
 The entrypoint must define `run_job(row)`, taking one row of your jobs data
 frame and returning whatever you want back:
@@ -82,6 +131,11 @@ run_job <- function(row) {
   data.frame(id = row$id, estimate = simulate(row$n, row$seed))
 }
 ```
+
+It is sourced once per worker with the project directory as the working
+directory, so it can `source()` its siblings by project-relative path, and
+`jobr_project_dir` holds the unpacked project's absolute path if it needs its
+own data files.
 
 The manifest is declarative on purpose. A worker has to discover what a project
 needs *before* running any of that project's code, so the list of files and the

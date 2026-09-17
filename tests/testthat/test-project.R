@@ -1,0 +1,161 @@
+# ---- scaffolding ------------------------------------------------------------
+
+test_that("a scaffolded project is immediately valid", {
+  p <- file.path(tempfile("scaffold-"), "mysim")
+  expect_message(jobr_new_project(p), "created project")
+  expect_true(jobr_check_project(p, quiet = TRUE)$ok)
+})
+
+test_that("a scaffolded project's stub entrypoint actually runs", {
+  p <- file.path(tempfile("scaffold-"), "mysim")
+  jobr_new_project(p)
+  runner <- load_entrypoint(p, manifest_read(p)$entrypoint)
+  expect_equal(runner(data.frame(id = 1, x = 21))$result, 42)
+})
+
+test_that("the scaffolded manifest explains itself", {
+  p <- file.path(tempfile("scaffold-"), "mysim")
+  jobr_new_project(p)
+  txt <- readLines(file.path(p, "jobR.dcf"))
+  expect_true(any(grepl("^#", txt)))          # commented, not bare fields
+  expect_true(any(grepl("\\?jobR.dcf", txt))) # points at the reference
+})
+
+test_that("a scaffolded project bundles and unpacks", {
+  p <- file.path(tempfile("scaffold-"), "mysim")
+  jobr_new_project(p)
+  b <- bundle_create(p)
+  out <- bundle_unpack(b$path, tempfile("u-"), expect_hash = b$hash)
+  expect_equal(manifest_read(out)$project, "mysim")
+})
+
+test_that("the project name is validated and the directory guarded", {
+  expect_error(jobr_new_project(tempfile(), name = "../escape"), "alphanumeric")
+  expect_error(jobr_new_project(tempfile(), name = "has space"), "alphanumeric")
+
+  occupied <- tempfile("occupied-")
+  dir.create(occupied); writeLines("x", file.path(occupied, "something"))
+  expect_error(jobr_new_project(occupied), "not empty")
+})
+
+# ---- validation -------------------------------------------------------------
+
+test_that("a missing manifest is reported rather than thrown", {
+  res <- jobr_check_project(tempfile(), quiet = TRUE)
+  expect_false(res$ok)
+  expect_match(res$problems, "no jobR.dcf", all = FALSE)
+})
+
+test_that("files listed but absent are reported", {
+  p <- file.path(tempfile("proj-"), "x"); jobr_new_project(p)
+  writeLines(c("Project: x", "Entrypoint: R/run.R", "Files: R/run.R, R/ghost.R"),
+             file.path(p, "jobR.dcf"))
+  res <- jobr_check_project(p, quiet = TRUE)
+  expect_false(res$ok)
+  expect_match(res$problems, "do not exist", all = FALSE)
+})
+
+test_that("an entrypoint that forgets run_job is reported", {
+  p <- file.path(tempfile("proj-"), "x"); jobr_new_project(p)
+  writeLines("helper <- function(x) x", file.path(p, "R", "run.R"))
+  res <- jobr_check_project(p, quiet = TRUE)
+  expect_false(res$ok)
+  expect_match(res$problems, "run_job", all = FALSE)
+})
+
+test_that("a declared lockfile that is absent is reported", {
+  p <- file.path(tempfile("proj-"), "x"); jobr_new_project(p)
+  writeLines(c("Project: x", "Entrypoint: R/run.R", "Files: R/run.R",
+               "Lockfile: renv.lock"), file.path(p, "jobR.dcf"))
+  res <- jobr_check_project(p, quiet = TRUE)
+  expect_false(res$ok)
+  expect_match(res$problems, "Lockfile", all = FALSE)
+})
+
+# ---- the shipped examples ---------------------------------------------------
+
+test_that("both bundled examples are valid projects", {
+  for (ex in c("montecarlo", "benchmark")) {
+    dir <- testthat::test_path("..", "..", "inst", "examples", ex)
+    skip_if_not(dir.exists(dir))
+    expect_true(jobr_check_project(dir, quiet = TRUE)$ok, info = ex)
+  }
+})
+
+test_that("the benchmark entrypoint reports host and elapsed time", {
+  dir <- testthat::test_path("..", "..", "inst", "examples", "benchmark")
+  skip_if_not(dir.exists(dir))
+  runner <- load_entrypoint(dir, "R/run.R")
+  out <- runner(data.frame(id = 7, seconds = 0.05))
+  expect_equal(out$id, 7)
+  expect_true(nzchar(out$host))
+  expect_gte(out$elapsed, 0.04)
+})
+
+# ---- benchmark helpers ------------------------------------------------------
+
+test_that("jobr_burn consumes roughly the time asked of it", {
+  t <- system.time(jobr_burn(0.2))[["elapsed"]]
+  expect_gte(t, 0.15)
+  expect_lt(t, 2)            # generous: CI machines stall unpredictably
+})
+
+test_that("benchmark jobs have the columns the entrypoint expects", {
+  j <- jobr_benchmark_jobs(50, seconds = 0.5)
+  expect_equal(nrow(j), 50L)
+  expect_setequal(names(j), c("id", "seconds"))
+  expect_true(all(j$seconds == 0.5))
+})
+
+test_that("the estimate is arithmetically right", {
+  e <- suppressMessages(jobr_estimate(240, seconds = 1, cores = c(a = 4, b = 8)))
+  expect_equal(unname(e[["cpu_seconds"]]), 240)
+  expect_equal(unname(e[["ideal_seconds"]]), 20)
+})
+
+test_that("the report attributes work to the right machines", {
+  mk <- function(host, ids) {
+    lapply(ids, function(i) data.frame(id = i, host = host, pid = 1,
+                                       elapsed = 1, finished = Sys.time()))
+  }
+  results <- list(do.call(rbind, mk("alpha", 1:3)),
+                  do.call(rbind, mk("beta", 4:5)))
+  rep <- jobr_benchmark_report(lapply(results, function(d) split(d, seq_len(nrow(d)))))
+  expect_equal(rep$host, c("alpha", "beta"))
+  expect_equal(rep$jobs, c(3L, 2L))
+  expect_equal(sum(rep$share), 1)
+})
+
+test_that("an empty report does not error", {
+  expect_equal(nrow(jobr_benchmark_report(list())), 0L)
+})
+
+# ---- preflight --------------------------------------------------------------
+
+test_that("LAN address discovery returns plausible addresses or nothing", {
+  addrs <- jobr_lan_address()
+  expect_type(addrs, "character")
+  for (a in addrs) {
+    expect_match(a, "^(\\d{1,3}\\.){3}\\d{1,3}$")
+    expect_false(startsWith(a, "127."))
+    expect_false(startsWith(a, "169.254."))
+  }
+})
+
+test_that("the doctor detects a free port and an occupied one", {
+  port <- 28100 + sample(300, 1)
+  free <- jobr_doctor(port, quiet = TRUE)
+  expect_true(free$port_free)
+
+  sock <- nanonext::socket("rep", listen = sprintf("tcp://0.0.0.0:%d", port))
+  on.exit(close(sock), add = TRUE)
+  taken <- jobr_doctor(port, quiet = TRUE)
+  expect_false(taken$port_free)
+  expect_match(taken$problems, "could not be bound", all = FALSE)
+})
+
+test_that("ping reports unreachable hosts without throwing", {
+  res <- jobr_ping("tcp://127.0.0.1:28999", timeout_ms = 400, quiet = TRUE)
+  expect_false(res$reachable)
+  expect_false(res$authenticated)
+})
