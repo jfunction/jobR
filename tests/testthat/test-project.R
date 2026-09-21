@@ -159,3 +159,68 @@ test_that("ping reports unreachable hosts without throwing", {
   expect_false(res$reachable)
   expect_false(res$authenticated)
 })
+
+# ---- running across different R versions ------------------------------------
+# A fleet of machines people already own is a fleet of mismatched R versions.
+# jobR's floor is R 3.6 (nanonext's floor), not an arbitrary 4.0.
+
+test_that("the R version string is well formed", {
+  expect_match(r_version_string(), "^[0-9]+[.][0-9]+")
+})
+
+test_that("matching versions produce no noise", {
+  expect_length(version_skew_warnings("4.5.3", worker_version = "4.5.3"), 0L)
+})
+
+test_that("an absent host version is tolerated", {
+  expect_length(version_skew_warnings(NULL), 0L)
+  expect_length(version_skew_warnings(""), 0L)
+})
+
+test_that("a minor version difference is reported but not alarming", {
+  w <- version_skew_warnings("4.5.3", worker_version = "4.4.1")
+  expect_length(w, 1L)
+  expect_match(w, "this worker runs R 4.4.1")
+  expect_false(any(grepl("stringsAsFactors", w)))
+})
+
+test_that("straddling R 4.0 warns about stringsAsFactors in both directions", {
+  old_worker <- version_skew_warnings("4.5.3", worker_version = "3.6.3")
+  expect_match(old_worker, "stringsAsFactors", all = FALSE)
+
+  old_host <- version_skew_warnings("3.6.3", worker_version = "4.5.3")
+  expect_match(old_host, "stringsAsFactors", all = FALSE)
+})
+
+test_that("two old versions do not warn about factors", {
+  w <- version_skew_warnings("3.6.1", worker_version = "3.6.3")
+  expect_match(w, "this worker runs", all = FALSE)
+  expect_false(any(grepl("stringsAsFactors", w)))
+})
+
+# ---- the shipped projects must model good practice --------------------------
+# These examples are what people copy, so a factor leaking out of one of them
+# would propagate into every project derived from it.
+
+test_that("every shipped example sets stringsAsFactors explicitly", {
+  for (ex in c("montecarlo", "benchmark")) {
+    f <- testthat::test_path("..", "..", "inst", "examples", ex, "R", "run.R")
+    skip_if_not(file.exists(f))
+    expect_match(paste(readLines(f), collapse = " "), "stringsAsFactors = FALSE",
+                 info = ex)
+  }
+})
+
+test_that("the scaffolded stub sets stringsAsFactors explicitly", {
+  p <- file.path(tempfile("scaffold-"), "mysim")
+  jobr_new_project(p)
+  expect_match(paste(readLines(file.path(p, "R", "run.R")), collapse = " "),
+               "stringsAsFactors = FALSE")
+})
+
+test_that("example results carry character columns, not factors", {
+  dir <- testthat::test_path("..", "..", "inst", "examples", "benchmark")
+  skip_if_not(dir.exists(dir))
+  out <- load_entrypoint(dir, "R/run.R")(data.frame(id = 1, seconds = 0.02))
+  expect_type(out$host, "character")
+})

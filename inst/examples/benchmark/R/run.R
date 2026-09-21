@@ -19,6 +19,10 @@ run_job <- function(row) {
     host     = Sys.info()[["nodename"]],
     pid      = Sys.getpid(),
     elapsed  = as.numeric(difftime(finished, started, units = "secs")),
-    finished = finished
+    finished = finished,
+    # Explicit because R 3.6 and earlier default this to TRUE: without it a
+    # worker on an old R returns `host` as a factor and a worker on R 4.x
+    # returns it as character. See ?versions.
+    stringsAsFactors = FALSE
   )
 }

@@ -47,6 +47,7 @@ host_new <- function(project_dir, jobs, chunksize = 25,
   state$bundle        <- bundle
   state$passphrase    <- passphrase
   state$tokens        <- character()
+  state$workers       <- character()
   state$lease_seconds <- lease_seconds
   state$work_dir      <- work_dir
   state$results_dir   <- results_dir
@@ -89,12 +90,20 @@ handle_request <- function(state, req, now = unix_time()) {
     }
     token <- token_new()
     state$tokens <- c(state$tokens, token)
+    # Record what each worker is running. A mixed fleet is normal and usually
+    # fine, but when results come back looking odd the first question is always
+    # "what R is that machine on", and the answer should already be to hand.
+    if (!is.null(req$r_version)) {
+      state$workers <- c(state$workers,
+                         stats::setNames(req$r_version, substr(token, 1, 8)))
+    }
     return(list(
       ok = TRUE, token = token, jobset = state$jobset,
       project = state$bundle$manifest$project,
       entrypoint = state$bundle$manifest$entrypoint,
       hash = state$bundle$hash, packages = state$bundle$packages,
-      n_chunks = state$n_chunks, n_jobs = nrow(state$jobs)
+      n_chunks = state$n_chunks, n_jobs = nrow(state$jobs),
+      host_r_version = r_version_string()
     ))
   }
 
@@ -158,6 +167,7 @@ handle_request <- function(state, req, now = unix_time()) {
 
     status = list(
       ok = TRUE, jobset = state$jobset, n_chunks = state$n_chunks,
+      workers = state$workers,
       progress = as.list(ledger_progress(state$ledger, state$jobset,
                                          state$n_chunks, now)),
       done = jobset_complete(state$ledger, state$jobset, state$n_chunks, now)

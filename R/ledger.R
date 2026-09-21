@@ -104,10 +104,34 @@ ledger_append <- function(led, type, jobset, chunk, worker = "",
     seq = seq, t = now, type = type, jobset = jobset, chunk = as.integer(chunk),
     worker = worker, lease = lease, stringsAsFactors = FALSE
   )
-  cat(paste(paste(format_field(row), collapse = "\t"), "\n", sep = ""),
-      file = led$path, append = TRUE)
+  ledger_write_line(led$path,
+                    paste(paste(format_field(row), collapse = "\t"), "\n", sep = ""))
+  # Only after the write succeeds. If it could not be persisted, the in-memory
+  # view must not claim it was, or a restarted host would disagree with its own
+  # ledger about what happened.
   led$events <- rbind(led$events, row)
   invisible(led)
+}
+
+# Appending can fail transiently on Windows, where antivirus and search
+# indexers briefly hold a file open after it is written: the open returns
+# "Permission denied" for a file that plainly exists and is writable a moment
+# later. The ledger is the one thing that has to survive, and losing an event
+# to a scanner would be a silent correctness bug, so retry briefly before
+# giving up. A genuine permissions problem still surfaces, just a little later.
+ledger_write_line <- function(path, line, attempts = 6L) {
+  for (i in seq_len(attempts)) {
+    ok <- tryCatch({
+      con <- file(path, open = "a")
+      on.exit(close(con), add = TRUE)
+      writeLines(line, con, sep = "")
+      TRUE
+    }, error = function(e) FALSE, warning = function(w) FALSE)
+    if (ok) return(invisible(TRUE))
+    if (i < attempts) Sys.sleep(0.02 * i)
+  }
+  stop("could not append to the ledger at ", path,
+       " after ", attempts, " attempts", call. = FALSE)
 }
 
 format_field <- function(row) {

@@ -1,6 +1,23 @@
+# One directory for the whole file, many ledgers inside it.
+#
 # NB: not withr::local_tempdir() -- that is scoped to this helper's own frame
-# and would be cleaned up before the caller ever writes to it.
-tmp_ledger <- function() ledger_open(file.path(tempfile("jobr-"), "ledger.tsv"))
+# and would be cleaned up before the caller ever writes to it. And deliberately
+# not a fresh directory per ledger: the property tests below ask for hundreds,
+# and creating that many directories in a tight loop fails intermittently on
+# Windows (a dir.create that appears to succeed, followed by a write that
+# cannot open the file). Creating files in one directory avoids the churn.
+tmp_ledger <- local({
+  dir <- NULL
+  n <- 0L
+  function() {
+    if (is.null(dir) || !dir.exists(dir)) {
+      dir <<- tempfile("jobr-ledgers-")
+      dir.create(dir, recursive = TRUE, showWarnings = FALSE)
+    }
+    n <<- n + 1L
+    ledger_open(file.path(dir, sprintf("ledger-%05d.tsv", n)))
+  }
+})
 
 # ---- chunk_plan -------------------------------------------------------------
 # The original implementation used floor(n_jobs / chunksize), silently dropping
@@ -203,4 +220,38 @@ test_that("jobsets are isolated from one another", {
   led <- ledger_append(led, "complete", "a", 1, "w", now = 1000)
   expect_true(jobset_complete(led, "a", 1, now = 1010))
   expect_false(jobset_complete(led, "b", 1, now = 1010))
+})
+
+# ---- transient write failures ----------------------------------------------
+# Windows antivirus and search indexers briefly hold newly written files open,
+# so an append to a file that plainly exists can return "Permission denied" and
+# succeed moments later. Losing a ledger event to a scanner would be a silent
+# correctness bug, so appends retry.
+
+test_that("a writable ledger is appended to on the first attempt", {
+  led <- tmp_ledger()
+  expect_true(ledger_write_line(led$path, "x\n"))
+  expect_true(any(grepl("^x$", readLines(led$path, warn = FALSE))))
+})
+
+test_that("an unwritable path fails loudly rather than silently", {
+  # A path whose parent directory does not exist can never become writable, so
+  # this exercises the give-up branch rather than the retry branch.
+  expect_error(
+    ledger_write_line(file.path(tempfile("absent-"), "nope", "l.tsv"), "x\n",
+                      attempts = 2L),
+    "could not append to the ledger"
+  )
+})
+
+test_that("a failed append leaves the in-memory ledger unchanged", {
+  led <- tmp_ledger()
+  led <- ledger_append(led, "assign", "js", 1, "w", lease = 2000, now = 1000)
+  before <- nrow(led$events)
+
+  led$path <- file.path(tempfile("gone-"), "nope", "l.tsv")
+  expect_error(ledger_append(led, "complete", "js", 1, "w", now = 1010))
+  # The event must not appear in memory when it could not reach disk, or a
+  # restarted host would disagree with its own ledger.
+  expect_equal(nrow(led$events), before)
 })

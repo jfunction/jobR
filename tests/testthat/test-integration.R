@@ -176,16 +176,18 @@ test_that("a jobset resumes after the host process is killed", {
   on.exit(kill_quietly(h1), add = TRUE)
   await_host(h1)
 
-  w1 <- start_worker(url1, phrase, max_seconds = 120)
+  # Bounded by chunks rather than by time. These jobs are trivial, so a worker
+  # left to run freely finishes all eight before the test can interrupt
+  # anything, and there is no partial state left to resume from.
+  w1 <- bg(function(url, phrase, cache) {
+    jobr_join(url, phrase, cache_dir = cache, quiet = TRUE, max_chunks = 3)
+  }, list(url = url1, phrase = phrase, cache = tempfile("cache-")))
   on.exit(kill_quietly(w1), add = TRUE)
-  wait_until(function() {
-    length(list.files(file.path(work, "results", "test"))) >= 2
-  }, timeout = 60, what = "some chunks to complete")
+  wait_until(function() !w1$is_alive(), timeout = 60, what = "first worker")
 
-  kill_quietly(h1); kill_quietly(w1)
+  kill_quietly(h1)
   partial <- length(list.files(file.path(work, "results", "test")))
-  expect_gt(partial, 0)
-  expect_lt(partial, 8)
+  expect_equal(partial, 3)
 
   # Same working directory, new process: the ledger carries the progress over.
   h2 <- start_host(work, proj, n_jobs = 40, chunksize = 5, url = url2,

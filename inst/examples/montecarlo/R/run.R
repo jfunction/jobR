@@ -6,6 +6,7 @@ run_job <- function(row) {
   data.frame(
     id       = row$id,
     n        = row$n,
-    estimate = estimate_pi(row$n, row$seed)
+    estimate = estimate_pi(row$n, row$seed),
+    stringsAsFactors = FALSE   # explicit: R 3.6 defaults this to TRUE (?versions)
   )
 }

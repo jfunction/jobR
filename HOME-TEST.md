@@ -69,7 +69,62 @@ Remove-NetFirewallRule -DisplayName "jobR"
 On macOS, the firewall will prompt for permission the first time — allow it. On
 Linux with `ufw`: `sudo ufw allow from 192.168.0.0/16 to any port 5555`.
 
-## 3. On laptop B — install
+## 3. On laptop B — check the R version, then install
+
+```r
+R.version.string
+```
+
+**If it says R 4.0 or newer, skip to "Install" at the end of this step.** Otherwise read this
+section — it is the most common reason a second machine will not join.
+
+### Why an old R is a problem, and what kind of problem
+
+jobR itself requires only **R 3.6**, which is the floor its dependencies set,
+not an arbitrary one. Refusing a working machine for no technical reason is
+exactly what this package exists to avoid, so the language version is rarely
+the real obstacle.
+
+The obstacle is **binaries**. CRAN builds Windows and macOS binaries only for
+the current R and the one before it. `nanonext` needs compiling — it bundles
+the NNG and mbedTLS C libraries — so on R 3.6 there is no binary to download
+and `install.packages("nanonext")` falls back to building from source. On
+Windows that means Rtools 3.5 and a C toolchain that has to compile two C
+libraries successfully. It sometimes works. It is not what you want standing
+between you and a first test.
+
+### Recommended: install a current R alongside the old one
+
+On Windows, R versions install **side by side** in separate directories. A new
+R does not replace or disturb R 3.6.3, and anything that depends on 3.6.3 keeps
+working:
+
+1. Download the current R from
+   <https://cran.r-project.org/bin/windows/base/>
+2. Install it. If you lack admin rights, choose a directory inside your user
+   folder — no elevation is needed.
+3. Open the **new** R (the Start Menu will list both) and continue below.
+
+If laptop B has RStudio, pick the version under Tools → Global Options → General
+→ R version, and restart.
+
+### If you cannot install a new R
+
+Then jobR will still work in principle, but you have to get `nanonext` built:
+
+- **Windows**: install [Rtools 3.5](https://cran.r-project.org/bin/windows/Rtools/history.html)
+  (the version matching R 3.6, *not* the current Rtools), then
+  `install.packages("nanonext", type = "source")`. Expect a long compile and
+  be ready for it to fail.
+- **Linux**: usually easier. `install.packages("nanonext")` builds from source
+  by default anyway; you need a C compiler and `make`, which most distributions
+  already have.
+
+Whichever route you take, mixed versions are supported — but read
+"Mismatched R versions" below before running a real workload, because there is
+one difference that changes results silently rather than failing loudly.
+
+### Install
 
 ```r
 install.packages(c("nanonext", "digest", "zip"))
@@ -172,6 +227,52 @@ late gets fewer.
 
 ---
 
+## Mismatched R versions
+
+Different machines running different R versions is normal here, and mostly
+fine. jobR records what each worker reports and tells you when they differ:
+
+```r
+jobR::jobr_join(url, passphrase)
+#> joined 'benchmark': 240 jobs in 24 chunks
+#> note: this worker runs R 3.6.3; the host runs R 4.5.3
+```
+
+One difference is worth real attention, because it changes results rather than
+failing. **R 4.0.0 changed `data.frame()` to default `stringsAsFactors = FALSE`;
+before that it defaulted to `TRUE`.** So a `run_job()` that builds a data frame
+with a character column returns **characters** on a worker running R 4.x and
+**factors** on a worker running R 3.6 — same code, same bundle.
+
+That is worse than it sounds for two reasons:
+
+```r
+# The combined type depends on which chunk arrives first, and in a distributed
+# run that is whichever machine happened to finish first:
+class(rbind(char_chunk, factor_chunk)$label)   # "character"
+class(rbind(factor_chunk, char_chunk)$label)   # "factor"
+
+# And a factor's as.numeric() gives the level code, not the value:
+as.numeric(factor("2024"))                     # 1, not 2024
+```
+
+So the same jobset can produce differently-typed results on two runs of the
+same work, and a column of numeric-looking strings can silently become 1, 2, 3.
+
+The fix is one argument, and it belongs in every project regardless of which
+machines you expect:
+
+```r
+run_job <- function(row) {
+  data.frame(id = row$id, label = "whatever", stringsAsFactors = FALSE)
+}
+```
+
+Both shipped examples do this, and `jobr_new_project()` writes it into the stub.
+`?versions` has the full explanation.
+
+---
+
 ## Things worth trying once it works
 
 **Kill a worker mid-run.** Close laptop B's lid, or Ctrl-C its R session, while
@@ -210,3 +311,5 @@ is wrong before anyone else has to find out.
 | `missing packages the project needs` | Install them on the worker; jobR ships code, not packages |
 | Host says `port could not be bound` | Something else is on 5555; pick another port |
 | Worker does nothing, host shows no progress | Check they are on the same subnet: both addresses should start the same, e.g. `192.168.1.` |
+| `nanonext` will not install on the worker | R older than 4.0 -- see step 3 |
+| Results have factors where you expected strings | A worker on R 3.6 and a missing `stringsAsFactors = FALSE` -- see "Mismatched R versions" |

@@ -112,7 +112,11 @@ jobr_new_project <- function(path, name = basename(path)) {
     "# to read your own data files.",
     "",
     "run_job <- function(row) {",
-    "  data.frame(id = row$id, result = row$x * 2)",
+    "  # stringsAsFactors = FALSE is explicit on purpose: R 3.6 and earlier",
+    "  # default it to TRUE, so without it a worker on an old R returns",
+    "  # factors where a worker on R 4.x returns characters. See ?versions.",
+    "  data.frame(id = row$id, result = row$x * 2,",
+    "             stringsAsFactors = FALSE)",
     "}"
   ), file.path(path, "R", "run.R"))
 

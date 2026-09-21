@@ -67,10 +67,12 @@ jobr_join <- function(url, passphrase,
     reply
   }
 
-  hi <- call(list(op = "hello", passphrase = passphrase))
+  hi <- call(list(op = "hello", passphrase = passphrase,
+                  r_version = r_version_string()))
   if (!isTRUE(hi$ok)) stop("could not join: ", hi$error, call. = FALSE)
   if (!quiet) message("joined '", hi$project, "': ", hi$n_jobs, " jobs in ",
                       hi$n_chunks, " chunks")
+  if (!quiet) for (w in version_skew_warnings(hi$host_r_version)) message("note: ", w)
 
   missing <- packages_missing(hi$packages)
   if (length(missing)) {

@@ -255,3 +255,32 @@ test_that("the bundled montecarlo example is a valid project", {
   expect_s3_class(out, "data.frame")
   expect_true(abs(out$estimate - pi) < 0.2)
 })
+
+# ---- R version reporting ----------------------------------------------------
+# Machines people already own run whatever R they already have. jobR does not
+# refuse them, but it does record what each is running, because "what R is that
+# machine on" is the first question when results come back looking odd.
+
+test_that("the host records the R version each worker reports", {
+  h <- demo_host()
+  handle_request(h, list(op = "hello", passphrase = "open-sesame-friend-please",
+                         r_version = "3.6.3"))
+  tok <- handle_request(h, list(op = "hello",
+                                passphrase = "open-sesame-friend-please",
+                                r_version = "4.5.3"))$token
+  st <- handle_request(h, list(op = "status", token = tok))
+  expect_setequal(unname(st$workers), c("3.6.3", "4.5.3"))
+})
+
+test_that("a worker that reports no version is still admitted", {
+  h <- demo_host()
+  r <- handle_request(h, list(op = "hello", passphrase = "open-sesame-friend-please"))
+  expect_true(r$ok)
+  expect_length(h$workers, 0L)
+})
+
+test_that("hello tells the worker what the host is running", {
+  h <- demo_host()
+  r <- handle_request(h, list(op = "hello", passphrase = "open-sesame-friend-please"))
+  expect_equal(r$host_r_version, r_version_string())
+})
