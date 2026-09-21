@@ -38,3 +38,26 @@ only ever run on one machine:
 }\if{html}{\out{</div>}}
 }
 
+\section{Random numbers}{
+
+A job that calls \code{set.seed()} must give the same answer wherever it runs.
+That is not free. mirai gives its daemons the L'Ecuyer-CMRG generator, which
+is the right default when you want independent parallel streams, but under a
+different generator \code{set.seed(42)} produces a different stream — so the same
+job would return different numbers depending on how many cores the worker
+happened to use:
+
+\if{html}{\out{<div class="sourceCode">}}\preformatted{set.seed(42); runif(1)   # 0.914806  under Mersenne-Twister (a worker)
+set.seed(42); runif(1)   # 0.173846  under L'Ecuyer-CMRG   (a mirai daemon)
+}\if{html}{\out{</div>}}
+
+\code{\link[=run_chunk]{run_chunk()}} therefore sets each daemon's generator to match the worker's
+before running anything, so \code{cores} affects only how fast a chunk is
+computed, never what it computes. If your project wants a particular
+generator, set it in the entrypoint and it will be honoured everywhere.
+
+What jobR does \strong{not} do is seed jobs for you. A job that does not set a
+seed is not reproducible, here or anywhere else; put the seed in the jobs
+data frame and use it, as \code{inst/examples/montecarlo} does.
+}
+

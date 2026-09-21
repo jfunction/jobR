@@ -117,3 +117,13 @@ expect_ledger_sane <- function(work_dir, jobset, n_chunks) {
   testthat::expect_true(all(ev$type %in% LEDGER_TYPES))
   invisible(st)
 }
+
+# Locate a bundled example project. Under R CMD check the tests run against an
+# installed package, where inst/ has become the package root; in a checkout it
+# is still inst/examples. Without this the example tests silently skip in the
+# one place it matters most -- the check that has to pass before release.
+example_dir <- function(name) {
+  installed <- system.file("examples", name, package = "jobR")
+  if (nzchar(installed) && dir.exists(installed)) return(installed)
+  testthat::test_path("..", "..", "inst", "examples", name)
+}

@@ -112,7 +112,9 @@ jobr_join <- function(url, passphrase,
     cores <- 1L
   }
 
-  runner <- load_entrypoint(project_dir, hi$entrypoint)
+  # Loaded once here so a broken entrypoint fails at join rather than being
+  # discovered chunk by chunk. run_chunk re-resolves it from the cache.
+  load_entrypoint_cached(project_dir, hi$entrypoint)
 
   done <- 0L
   consecutive_failures <- 0L
@@ -137,7 +139,7 @@ jobr_join <- function(url, passphrase,
     }
 
     if (!quiet) message("  chunk ", cl$chunk, " (", nrow(cl$jobs), " jobs)")
-    out <- tryCatch(run_chunk(runner, cl$jobs, cores = cores),
+    out <- tryCatch(run_chunk(project_dir, hi$entrypoint, cl$jobs, cores = cores),
                     error = function(e) e)
     if (inherits(out, "error")) {
       # Hand the chunk back rather than submitting a result that is really an
@@ -204,15 +206,24 @@ load_entrypoint <- function(project_dir, entrypoint) {
 
 #' Run one chunk of jobs
 #'
-#' @param runner A `run_job` function taking one row of the jobs data frame.
+#' Takes the project rather than a loaded function, because a `run_job` closure
+#' cannot be sent to another process intact. mirai evaluates a mapped function
+#' in a fresh environment, so a closure's enclosing environment does not travel
+#' with it: `run_job` would arrive, but anything it was defined alongside --
+#' every helper in every other file the manifest lists -- would not. Each daemon
+#' therefore sources the project itself, exactly as a serial worker does.
+#'
+#' @param project_dir Unpacked project directory.
+#' @param entrypoint Relative path to the entrypoint, from the manifest.
 #' @param jobs A data frame of jobs.
 #' @param cores Local cores. 1 runs serially; more uses local mirai daemons.
 #'
 #' @return A list of per-row results, in row order.
 #' @export
-run_chunk <- function(runner, jobs, cores = 1L) {
+run_chunk <- function(project_dir, entrypoint, jobs, cores = 1L) {
   n <- nrow(jobs)
   if (n == 0L) return(list())
+
   # mirai is Suggested. Degrade rather than fail: a machine without it can
   # still contribute, just one job at a time. [jobr_join()] checks this once at
   # join time so the warning is not repeated for every chunk.
@@ -221,18 +232,88 @@ run_chunk <- function(runner, jobs, cores = 1L) {
             "on ", cores, " cores", call. = FALSE)
     cores <- 1L
   }
+
   if (cores <= 1L) {
+    runner <- load_entrypoint_cached(project_dir, entrypoint)
     return(lapply(seq_len(n), function(i) runner(jobs[i, , drop = FALSE])))
   }
+
   # Within a worker, mirai parallelises across that machine's own cores. The
   # division of labour is deliberate: jobR moves work between machines, mirai
   # moves it between cores.
   mirai::daemons(as.integer(cores), .compute = "jobr_local")
   on.exit(mirai::daemons(0L, .compute = "jobr_local"), add = TRUE)
+
+  # `.args` supplies constants. mirai_map's `...` would instead iterate over
+  # them in parallel with `.x`, the way Map() does -- passing the project there
+  # silently maps over its characters rather than handing it to every call.
   m <- mirai::mirai_map(
     seq_len(n),
-    function(i) runner(jobs[i, , drop = FALSE]),
-    runner = runner, jobs = jobs, .compute = "jobr_local"
+    function(i, .pd, .ep, .jobs, .load, .rng) {
+      # mirai gives its daemons L'Ecuyer-CMRG, which is the right default for
+      # drawing independent parallel streams. jobR's contract is the opposite:
+      # a job carries its own seed and must produce the same answer wherever it
+      # runs. Under a different generator set.seed(42) yields a different
+      # stream, so the same job would give different numbers depending on how
+      # many cores the worker happened to use. Match the worker's generator.
+      if (!identical(RNGkind(), .rng)) {
+        suppressWarnings(do.call(RNGkind, as.list(.rng)))
+      }
+      # Cached in the daemon's global environment: sourcing a project may be
+      # expensive -- it can load data or fit a model -- and a daemon handles
+      # many jobs, so doing it once per daemon rather than once per job matters.
+      #
+      # R CMD check flags this as an assignment to the global environment. It
+      # is a false positive: this function body is evaluated inside a mirai
+      # daemon, a separate process with its own global environment, and never
+      # in the user's session. Static analysis cannot see the process boundary.
+      runner <- get0(".jobr_runner", envir = globalenv(), ifnotfound = NULL)
+      if (is.null(runner)) {
+        runner <- .load(.pd, .ep)
+        assign(".jobr_runner", runner, envir = globalenv())
+      }
+      runner(.jobs[i, , drop = FALSE])
+    },
+    # load_entrypoint is passed rather than called as jobR::load_entrypoint so
+    # that daemons need not resolve the jobR namespace, and so there is only
+    # one definition of how a project is loaded. It uses nothing but base
+    # functions, so losing its closure environment in transit costs nothing.
+    .args = list(.pd = normalizePath(project_dir), .ep = entrypoint,
+                 .jobs = jobs, .load = load_entrypoint, .rng = RNGkind()),
+    .compute = "jobr_local"
   )
-  m[]
+  results <- m[]
+
+  # mirai reports a failed task by RETURNING an errorValue, not by throwing.
+  # Left unchecked these are submitted to the host as though they were results:
+  # the ledger marks every chunk complete and the jobset finishes full of
+  # errors. Turn them back into an R error so the chunk is failed and reissued.
+  bad <- vapply(results, function(x) inherits(x, "errorValue"), logical(1))
+  if (any(bad)) {
+    stop(sum(bad), " of ", n, " jobs in this chunk failed. First failure: ",
+         chunk_error_text(results[[which(bad)[1]]]), call. = FALSE)
+  }
+  results
+}
+
+# miraiError carries its message as a character vector rather than as a
+# condition message, so neither accessor alone covers both cases.
+chunk_error_text <- function(x) {
+  msg <- tryCatch(conditionMessage(x), error = function(e) NULL)
+  if (is.null(msg) || !length(msg)) msg <- as.character(x)
+  trimws(paste(msg, collapse = " "))
+}
+
+# Sourcing a project is not free -- it may load data or fit something -- so the
+# serial path caches per project, mirroring the per-daemon cache above.
+.runner_cache <- new.env(parent = emptyenv())
+
+load_entrypoint_cached <- function(project_dir, entrypoint) {
+  key <- paste(project_dir, entrypoint, sep = "|")
+  runner <- get0(key, envir = .runner_cache, ifnotfound = NULL)
+  if (is.null(runner)) {
+    runner <- load_entrypoint(project_dir, entrypoint)
+    assign(key, runner, envir = .runner_cache)
+  }
+  runner
 }

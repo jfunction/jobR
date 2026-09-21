@@ -246,7 +246,7 @@ test_that("an entrypoint without run_job is rejected", {
 })
 
 test_that("the bundled montecarlo example is a valid project", {
-  ex <- testthat::test_path("..", "..", "inst", "examples", "montecarlo")
+  ex <- example_dir("montecarlo")
   skip_if_not(dir.exists(ex))
   man <- manifest_read(ex)
   expect_equal(man$project, "montecarlo")

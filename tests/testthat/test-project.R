@@ -76,14 +76,14 @@ test_that("a declared lockfile that is absent is reported", {
 
 test_that("both bundled examples are valid projects", {
   for (ex in c("montecarlo", "benchmark")) {
-    dir <- testthat::test_path("..", "..", "inst", "examples", ex)
+    dir <- example_dir(ex)
     skip_if_not(dir.exists(dir))
     expect_true(jobr_check_project(dir, quiet = TRUE)$ok, info = ex)
   }
 })
 
 test_that("the benchmark entrypoint reports host and elapsed time", {
-  dir <- testthat::test_path("..", "..", "inst", "examples", "benchmark")
+  dir <- example_dir("benchmark")
   skip_if_not(dir.exists(dir))
   runner <- load_entrypoint(dir, "R/run.R")
   out <- runner(data.frame(id = 7, seconds = 0.05))
@@ -204,7 +204,7 @@ test_that("two old versions do not warn about factors", {
 
 test_that("every shipped example sets stringsAsFactors explicitly", {
   for (ex in c("montecarlo", "benchmark")) {
-    f <- testthat::test_path("..", "..", "inst", "examples", ex, "R", "run.R")
+    f <- file.path(example_dir(ex), "R", "run.R")
     skip_if_not(file.exists(f))
     expect_match(paste(readLines(f), collapse = " "), "stringsAsFactors = FALSE",
                  info = ex)
@@ -219,8 +219,101 @@ test_that("the scaffolded stub sets stringsAsFactors explicitly", {
 })
 
 test_that("example results carry character columns, not factors", {
-  dir <- testthat::test_path("..", "..", "inst", "examples", "benchmark")
+  dir <- example_dir("benchmark")
   skip_if_not(dir.exists(dir))
   out <- load_entrypoint(dir, "R/run.R")(data.frame(id = 1, seconds = 0.02))
   expect_type(out$host, "character")
+})
+
+# ---- multi-core execution ---------------------------------------------------
+# Found on a real run: every job came back as an errorValue, and because mirai
+# RETURNS those rather than throwing, the worker submitted them as results. The
+# host marked all 24 chunks complete and the jobset "finished" full of errors.
+
+test_that("a multi-file project works across cores", {
+  skip_if_not_installed("mirai")
+  skip_on_cran()
+  dir <- example_dir("benchmark")
+  skip_if_not(dir.exists(dir))
+  jobs <- data.frame(id = 1:4, seconds = 0.05)
+
+  # The entrypoint calls burn(), defined in a sibling file. A closure shipped
+  # to a daemon loses its enclosing environment, so this is exactly the case
+  # that used to fail.
+  out <- run_chunk(dir, "R/run.R", jobs, cores = 2)
+  expect_length(out, 4L)
+  expect_true(all(vapply(out, is.data.frame, logical(1))))
+  expect_equal(sort(do.call(rbind, out)$id), 1:4)
+})
+
+test_that("serial and parallel give the same answers", {
+  skip_if_not_installed("mirai")
+  skip_on_cran()
+  dir <- example_dir("montecarlo")
+  skip_if_not(dir.exists(dir))
+  jobs <- data.frame(id = 1:4, n = 2000, seed = 1:4)
+
+  serial <- do.call(rbind, run_chunk(dir, "R/run.R", jobs, cores = 1))
+  par    <- do.call(rbind, run_chunk(dir, "R/run.R", jobs, cores = 2))
+  expect_equal(serial, par)
+})
+
+test_that("a failing job raises an error instead of returning errorValues", {
+  skip_if_not_installed("mirai")
+  skip_on_cran()
+  d <- tempfile("proj-"); dir.create(file.path(d, "R"), recursive = TRUE)
+  writeLines("run_job <- function(row) stop('boom in job ', row$id)",
+             file.path(d, "R", "run.R"))
+  writeLines(c("Project: boom", "Entrypoint: R/run.R", "Files: R/run.R"),
+             file.path(d, "jobR.dcf"))
+  jobs <- data.frame(id = 1:3)
+
+  # Both paths must FAIL, not return error objects that look like results.
+  expect_error(run_chunk(d, "R/run.R", jobs, cores = 1), "boom")
+  expect_error(run_chunk(d, "R/run.R", jobs, cores = 2),
+               "jobs in this chunk failed")
+})
+
+test_that("a chunk that errors on only some jobs still fails as a whole", {
+  skip_if_not_installed("mirai")
+  skip_on_cran()
+  d <- tempfile("proj-"); dir.create(file.path(d, "R"), recursive = TRUE)
+  writeLines(c("run_job <- function(row) {",
+               "  if (row$id == 2) stop('only job two')",
+               "  data.frame(id = row$id, stringsAsFactors = FALSE)",
+               "}"), file.path(d, "R", "run.R"))
+  writeLines(c("Project: partial", "Entrypoint: R/run.R", "Files: R/run.R"),
+             file.path(d, "jobR.dcf"))
+  err <- tryCatch(run_chunk(d, "R/run.R", data.frame(id = 1:4), cores = 2),
+                  error = function(e) conditionMessage(e))
+  expect_match(err, "1 of 4 jobs in this chunk failed")
+  expect_match(err, "only job two")
+})
+
+test_that("an empty chunk is not an error", {
+  dir <- example_dir("benchmark")
+  skip_if_not(dir.exists(dir))
+  expect_equal(run_chunk(dir, "R/run.R", data.frame(id = integer()), cores = 1),
+               list())
+})
+
+# ---- the report must not crash on bad input --------------------------------
+
+test_that("a report over failed results explains itself", {
+  errs <- list(list(structure(-1L, class = "errorValue"),
+                    structure(-1L, class = "errorValue")))
+  expect_error(jobr_benchmark_report(errs), "none of these results are data frames")
+})
+
+test_that("a report over results lacking the expected columns says which", {
+  res <- list(list(data.frame(id = 1, value = 2)))
+  expect_error(jobr_benchmark_report(res), "missing the column")
+})
+
+test_that("a report skips the odd bad result but still reports", {
+  ok <- function(h) data.frame(id = 1, host = h, pid = 1, elapsed = 1,
+                               finished = Sys.time(), stringsAsFactors = FALSE)
+  res <- list(list(ok("alpha"), structure(-1L, class = "errorValue")))
+  expect_warning(rep <- jobr_benchmark_report(res), "were skipped")
+  expect_equal(rep$host, "alpha")
 })

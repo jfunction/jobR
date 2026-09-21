@@ -88,10 +88,36 @@ jobr_estimate <- function(n = 240, seconds = 1, cores = 1) {
 #'   contributed, and share of the total.
 #' @export
 jobr_benchmark_report <- function(results) {
-  rows <- do.call(rbind, lapply(results, function(chunk) do.call(rbind, chunk)))
-  if (is.null(rows) || !nrow(rows)) {
-    return(data.frame(host = character(), jobs = integer(),
-                      cpu_seconds = numeric(), share = numeric()))
+  empty <- data.frame(host = character(), jobs = integer(),
+                      cpu_seconds = numeric(), share = numeric())
+  if (!length(results)) return(empty)
+
+  # Results are whatever the project's run_job returned, so this can be handed
+  # anything at all -- including, when something has gone wrong upstream, a
+  # list of error objects. Say so plainly instead of failing with "$ operator
+  # is invalid for atomic vectors" several frames deep.
+  flat <- unlist(results, recursive = FALSE)
+  bad <- vapply(flat, function(x) !is.data.frame(x), logical(1))
+  if (all(bad)) {
+    stop("none of these results are data frames. ",
+         "If they are errorValue objects, the jobs failed on the workers and ",
+         "the failures were recorded as results; check the worker output.",
+         call. = FALSE)
+  }
+  if (any(bad)) {
+    warning(sum(bad), " of ", length(flat),
+            " results are not data frames and were skipped", call. = FALSE)
+    flat <- flat[!bad]
+  }
+
+  rows <- do.call(rbind, flat)
+  if (is.null(rows) || !nrow(rows)) return(empty)
+  missing_cols <- setdiff(c("host", "elapsed"), names(rows))
+  if (length(missing_cols)) {
+    stop("results are missing the column(s) this report needs: ",
+         paste(missing_cols, collapse = ", "),
+         ". jobr_benchmark_report() expects results from the bundled ",
+         "benchmark project.", call. = FALSE)
   }
   by_host <- split(rows, rows$host)
   out <- data.frame(

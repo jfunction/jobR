@@ -4,10 +4,12 @@
 \alias{run_chunk}
 \title{Run one chunk of jobs}
 \usage{
-run_chunk(runner, jobs, cores = 1L)
+run_chunk(project_dir, entrypoint, jobs, cores = 1L)
 }
 \arguments{
-\item{runner}{A \code{run_job} function taking one row of the jobs data frame.}
+\item{project_dir}{Unpacked project directory.}
+
+\item{entrypoint}{Relative path to the entrypoint, from the manifest.}
 
 \item{jobs}{A data frame of jobs.}
 
@@ -17,5 +19,10 @@ run_chunk(runner, jobs, cores = 1L)
 A list of per-row results, in row order.
 }
 \description{
-Run one chunk of jobs
+Takes the project rather than a loaded function, because a \code{run_job} closure
+cannot be sent to another process intact. mirai evaluates a mapped function
+in a fresh environment, so a closure's enclosing environment does not travel
+with it: \code{run_job} would arrive, but anything it was defined alongside --
+every helper in every other file the manifest lists -- would not. Each daemon
+therefore sources the project itself, exactly as a serial worker does.
 }
