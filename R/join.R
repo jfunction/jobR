@@ -27,6 +27,10 @@ NULL
 #'   a reason to stop.
 #' @param max_chunks Stop after contributing this many chunks. Lets a machine
 #'   donate a bounded amount of work rather than staying until the jobset ends.
+#' @param max_failures Stop after this many chunks fail in a row. Repeated
+#'   failures usually mean this machine is misconfigured rather than that the
+#'   work is bad, and a worker that keeps failing hands chunks back to the pool
+#'   indefinitely.
 #' @param max_seconds Give up after this long.
 #' @param quiet Suppress progress output.
 #'
@@ -36,7 +40,7 @@ jobr_join <- function(url, passphrase,
                       cache_dir = file.path(tempdir(), "jobr-worker"),
                       tls = NULL, cores = 1L, timeout_ms = 5000,
                       poll_seconds = 2, max_chunks = Inf, max_seconds = Inf,
-                      quiet = FALSE) {
+                      max_failures = 5L, quiet = FALSE) {
   sock <- nanonext::socket("req", dial = url, tls = tls)
   on.exit(close(sock), add = TRUE)
   started <- unix_time()
@@ -95,9 +99,23 @@ jobr_join <- function(url, passphrase,
     message("project bundle already current, nothing to fetch")
   }
 
+  # mirai is Suggested, not required: it is only needed to spread a chunk
+  # across this machine's own cores. Discovering that at the point of running a
+  # chunk is far too late -- the chunk fails, is handed back, claimed again,
+  # and fails identically forever. Check it once, here, and carry on serially
+  # if it is absent, because a worker contributing one core is still a worker.
+  if (cores > 1L && !requireNamespace("mirai", quietly = TRUE)) {
+    message("cores = ", cores, " needs the 'mirai' package, which is not ",
+            "installed on this machine.\n",
+            "  running one job at a time instead. To use all ", cores,
+            " cores:  install.packages(\"mirai\")")
+    cores <- 1L
+  }
+
   runner <- load_entrypoint(project_dir, hi$entrypoint)
 
   done <- 0L
+  consecutive_failures <- 0L
   repeat {
     if (unix_time() - started > max_seconds) break
     if (done >= max_chunks) break
@@ -125,9 +143,22 @@ jobr_join <- function(url, passphrase,
       # Hand the chunk back rather than submitting a result that is really an
       # error. Someone else, or this worker on a later pass, can retry it.
       call(list(op = "fail", token = hi$token, chunk = cl$chunk), fatal = FALSE)
+      consecutive_failures <- consecutive_failures + 1L
       if (!quiet) message("  chunk ", cl$chunk, " failed: ", conditionMessage(out))
+
+      # Something wrong with this machine rather than with that chunk -- a
+      # missing package, an unreadable path -- fails every chunk identically.
+      # Without a limit the worker spins, and each failure hands work back to
+      # the pool, so a single broken machine can churn the whole jobset.
+      if (consecutive_failures >= max_failures) {
+        stop("giving up after ", max_failures, " chunks failed in a row on this ",
+             "machine.\n  This usually means the environment is wrong rather ",
+             "than the work.\n  Last error: ", conditionMessage(out),
+             call. = FALSE)
+      }
       next
     }
+    consecutive_failures <- 0L
     if (is.null(call(list(op = "submit", token = hi$token, chunk = cl$chunk,
                           results = out), fatal = FALSE))) {
       if (!quiet) message("host vanished before chunk ", cl$chunk, " was accepted")
@@ -182,6 +213,14 @@ load_entrypoint <- function(project_dir, entrypoint) {
 run_chunk <- function(runner, jobs, cores = 1L) {
   n <- nrow(jobs)
   if (n == 0L) return(list())
+  # mirai is Suggested. Degrade rather than fail: a machine without it can
+  # still contribute, just one job at a time. [jobr_join()] checks this once at
+  # join time so the warning is not repeated for every chunk.
+  if (cores > 1L && !requireNamespace("mirai", quietly = TRUE)) {
+    warning("'mirai' is not installed; running this chunk serially instead of ",
+            "on ", cores, " cores", call. = FALSE)
+    cores <- 1L
+  }
   if (cores <= 1L) {
     return(lapply(seq_len(n), function(i) runner(jobs[i, , drop = FALSE])))
   }

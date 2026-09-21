@@ -14,6 +14,7 @@ jobr_join(
   poll_seconds = 2,
   max_chunks = Inf,
   max_seconds = Inf,
+  max_failures = 5L,
   quiet = FALSE
 )
 }
@@ -38,6 +39,11 @@ a reason to stop.}
 donate a bounded amount of work rather than staying until the jobset ends.}
 
 \item{max_seconds}{Give up after this long.}
+
+\item{max_failures}{Stop after this many chunks fail in a row. Repeated
+failures usually mean this machine is misconfigured rather than that the
+work is bad, and a worker that keeps failing hands chunks back to the pool
+indefinitely.}
 
 \item{quiet}{Suppress progress output.}
 }

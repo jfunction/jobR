@@ -202,3 +202,76 @@ test_that("a jobset resumes after the host process is killed", {
   expect_equal(collected(work, "test"), serial_expectation(40), ignore_attr = TRUE)
   expect_true(all(expect_ledger_sane(work, "test", 8)$state == "done"))
 })
+
+# ---- a worker whose environment is broken -----------------------------------
+# Found on a real two-machine run: the client lacked mirai, so every chunk
+# failed identically, was handed back, claimed again, and failed again. The
+# same error streamed forever and the jobset could never finish.
+
+test_that("a worker failing every chunk gives up instead of spinning", {
+  skip_unless_integration()
+  work <- tempfile("host-")
+  # An entrypoint that always throws, standing in for any systematically
+  # broken environment: a missing package, an unreadable path, a bad library.
+  proj <- tempfile("proj-"); dir.create(file.path(proj, "R"), recursive = TRUE)
+  writeLines(c("run_job <- function(row) stop('this machine is misconfigured')"),
+             file.path(proj, "R", "run.R"))
+  writeLines(c("Project: broken", "Entrypoint: R/run.R", "Files: R/run.R"),
+             file.path(proj, "jobR.dcf"))
+  url <- test_url(); phrase <- "alpha-alpha-alpha-alpha"
+
+  h <- start_host(work, proj, n_jobs = 100, chunksize = 5, url = url,
+                  phrase = phrase, max_seconds = 60)
+  on.exit(kill_quietly(h), add = TRUE)
+  await_host(h)
+
+  w <- bg(function(url, phrase, cache) {
+    jobr_join(url, phrase, cache_dir = cache, quiet = FALSE,
+              max_failures = 3L, max_seconds = 45)
+  }, list(url = url, phrase = phrase, cache = tempfile("cache-")))
+  on.exit(kill_quietly(w), add = TRUE)
+
+  # The point is that it STOPS. Before max_failures existed this ran until the
+  # timeout, emitting the same error over and over.
+  wait_until(function() !w$is_alive(), timeout = 60, what = "worker to give up")
+  err <- paste(w$read_all_error_lines(), collapse = " ")
+  expect_match(err, "giving up after 3 chunks failed in a row")
+  expect_match(err, "misconfigured")
+
+  # And it gave the work back rather than marking it done.
+  expect_null(collected(work, "test"))
+})
+
+test_that("an occasional chunk failure does not stop a healthy worker", {
+  skip_unless_integration()
+  work <- tempfile("host-")
+  # Fails only on job 3, and only the first time it is seen.
+  sentinel <- file.path(tempfile("sent-"), "seen")
+  proj <- tempfile("proj-"); dir.create(file.path(proj, "R"), recursive = TRUE)
+  writeLines(c(
+    sprintf("sentinel <- %s", deparse(sentinel)),
+    "run_job <- function(row) {",
+    "  if (row$x == 3 && !file.exists(sentinel)) {",
+    "    dir.create(dirname(sentinel), recursive = TRUE, showWarnings = FALSE)",
+    "    file.create(sentinel)",
+    "    stop('transient')",
+    "  }",
+    "  data.frame(x = row$x, y = row$x * 2, stringsAsFactors = FALSE)",
+    "}"), file.path(proj, "R", "run.R"))
+  writeLines(c("Project: flaky", "Entrypoint: R/run.R", "Files: R/run.R"),
+             file.path(proj, "jobR.dcf"))
+  url <- test_url(); phrase <- "bravo-bravo-bravo-bravo"
+
+  h <- start_host(work, proj, n_jobs = 20, chunksize = 5, url = url,
+                  phrase = phrase, lease = 5, max_seconds = 90)
+  on.exit(kill_quietly(h), add = TRUE)
+  await_host(h)
+
+  w <- start_worker(url, phrase, max_seconds = 90)
+  on.exit(kill_quietly(w), add = TRUE)
+  wait_until(function() !w$is_alive(), timeout = 90, what = "worker to finish")
+
+  # One failure resets on the next success, so the run completes in full.
+  expect_equal(collected(work, "test"), serial_expectation(20), ignore_attr = TRUE)
+  expect_true(all(expect_ledger_sane(work, "test", 4)$state == "done"))
+})

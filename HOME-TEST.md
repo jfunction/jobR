@@ -54,9 +54,14 @@ continuing; it is the step that saves the most time.
 accepts connections only from laptop A itself, and gives no hint that it is
 doing so.
 
-*The host firewall.* Windows blocks inbound connections by default and drops
-them **silently** — laptop B simply hangs and then times out. Allow the port
-once, from an **admin** PowerShell on laptop A:
+*The host firewall.* This may well not bother you. The first time R listens on
+a port, Windows usually pops up "Allow R to communicate on these networks?" —
+say yes and you are done. A rule may also already exist from earlier R use.
+
+You only need to intervene when there is no prompt *and* laptop B cannot
+connect, because a blocked inbound connection fails **silently**: laptop B
+simply hangs and times out. If that happens, allow the port from an **admin**
+PowerShell on laptop A:
 
 ```powershell
 New-NetFirewallRule -DisplayName "jobR" -Direction Inbound -Protocol TCP -LocalPort 5555 -Action Allow -Profile Private
@@ -97,7 +102,26 @@ Windows that means Rtools 3.5 and a C toolchain that has to compile two C
 libraries successfully. It sometimes works. It is not what you want standing
 between you and a first test.
 
-### Recommended: install a current R alongside the old one
+### First: look for another R already on the machine
+
+Before downloading anything, check. Machines used for R work over several years
+often have a few versions lying around, and one may already be new enough:
+
+```r
+# Windows: R installs live side by side here
+list.files("C:/Program Files/R")
+```
+
+This is the path of least resistance, and it is what worked on the machine this
+guide was tested against — it turned out to have R 3.6.3 **and** R 4.0.5 with
+Rtools40 already installed. Switching to the 4.0.5 was enough: no download, no
+admin rights, no compiler wrangling.
+
+Rtools has to match the R you use (Rtools40 goes with R 4.0–4.1, Rtools 3.5
+with R 3.6), which is a further reason to prefer an R that already has a working
+toolchain beside it.
+
+### Otherwise: install a current R alongside the old one
 
 On Windows, R versions install **side by side** in separate directories. A new
 R does not replace or disturb R 3.6.3, and anything that depends on 3.6.3 keeps
@@ -112,7 +136,7 @@ working:
 If laptop B has RStudio, pick the version under Tools → Global Options → General
 → R version, and restart.
 
-### If you cannot install a new R
+### If you genuinely cannot get a newer R
 
 Then jobR will still work in principle, but you have to get `nanonext` built:
 
@@ -132,7 +156,14 @@ one difference that changes results silently rather than failing loudly.
 
 ```r
 install.packages(c("nanonext", "digest", "zip"))
+install.packages("mirai")   # only needed if you will pass cores > 1
 ```
+
+**Install `mirai` if you intend to use more than one core on this machine.**
+jobR uses it to spread a chunk across the worker's own cores, and it is
+Suggested rather than required so that a minimal machine can still contribute.
+Without it, `jobr_join(cores = 4)` tells you so at join time and runs one job
+at a time instead.
 
 Copy `jobR_0.2.0.tar.gz` across — USB stick, shared folder, `scp`, whatever is
 easiest — then:
@@ -248,12 +279,22 @@ Then:
 jobR::jobr_join("tcp://192.168.1.5:5555", "canyon-drifting-walnut-embassy", cores = 4)
 ```
 
-Start a second worker on laptop A too, in a *separate* R session, so both
-machines contribute:
+### Laptop A can work too
+
+Hosting and working are separate roles, and one machine can do both. The host
+process itself only hands out chunks and records results — it does no
+computation — so laptop A's cores sit idle unless you also join from it.
+
+Open a **separate** R session on laptop A (the hosting session is blocked
+inside `jobr_serve()`) and join over loopback:
 
 ```r
 jobR::jobr_join("tcp://127.0.0.1:5555", "canyon-drifting-walnut-embassy", cores = 4)
 ```
+
+It is an ordinary worker in every respect: it claims chunks, holds leases, and
+shows up separately in the report. You can run several on one machine if you
+prefer that to `cores`.
 
 ## 7. Read the result
 
@@ -359,4 +400,6 @@ is wrong before anyone else has to find out.
 | Worker does nothing, host shows no progress | Check they are on the same subnet: both addresses should start the same, e.g. `192.168.1.` |
 | `nanonext` will not install on the worker | R older than 4.0 -- see step 3 |
 | Install fails: `Permission denied` on `jobR.rdb` | Antivirus holding a just-written file; intermittent, just retry -- see step 3 |
+| `cores = N` runs one job at a time anyway | `mirai` not installed on that worker; `install.packages("mirai")` |
+| Worker stops: `giving up after N chunks failed in a row` | That machine is misconfigured, not the work -- read the last error it printed |
 | Results have factors where you expected strings | A worker on R 3.6 and a missing `stringsAsFactors = FALSE` -- see "Mismatched R versions" |
