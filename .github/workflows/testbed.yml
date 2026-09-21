@@ -1,0 +1,44 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Unit, property and single-machine integration tests. Fast, and where most
+  # failures will be caught.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::rcmdcheck, any::testthat, any::callr, any::mirai
+      - uses: r-lib/actions/check-r-package@v2
+        env:
+          NOT_CRAN: "true"
+          JOBR_INTEGRATION: "1"
+        with:
+          args: 'c("--no-manual", "--as-cran")'
+          error-on: '"warning"'
+
+  # The multi-node testbed: separate containers, separate R versions, a real
+  # network between them. This is the part a single machine cannot test.
+  testbed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the mixed-version testbed
+        run: |
+          docker compose -f docker/docker-compose.yml up             --build --abort-on-container-exit --exit-code-from host
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose -f docker/docker-compose.yml logs --no-color
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker/docker-compose.yml down -v

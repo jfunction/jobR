@@ -1,0 +1,83 @@
+# A mixed-version, multi-node jobR testbed.
+#
+#   docker compose -f docker/docker-compose.yml up --build --exit-code-from host
+#
+# The host container's exit code is the test result. Workers deliberately run
+# different R versions: a fleet of machines people already own is a fleet of
+# mismatched R, and that is where the subtlest bugs live (see ?versions).
+
+name: jobr-testbed
+
+x-common: &common
+  networks: [jobr]
+  environment:
+    JOBR_PASSPHRASE: testbed-alpha-bravo-charlie
+
+services:
+  host:
+    <<: *common
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        R_VERSION: "4.4.1"
+    command: ["Rscript", "/opt/jobr/docker/host.R"]
+    environment:
+      JOBR_PASSPHRASE: testbed-alpha-bravo-charlie
+      JOBR_JOBS: "60"
+      JOBR_CHUNKSIZE: "5"
+      JOBR_SECONDS: "0.4"
+      JOBR_LEASE: "20"
+      # Three workers, but only assert two distinct hosts: one could finish the
+      # jobset before a slower container has claimed anything, and that is a
+      # legitimate outcome rather than a failure.
+      JOBR_EXPECT_HOSTS: "2"
+      JOBR_DEADLINE: "300"
+
+  worker-current:
+    <<: *common
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        R_VERSION: "4.4.1"
+    command: ["Rscript", "/opt/jobr/docker/worker.R"]
+    depends_on: [host]
+    environment:
+      JOBR_PASSPHRASE: testbed-alpha-bravo-charlie
+      JOBR_URL: tcp://host:5555
+      JOBR_CORES: "2"
+
+  worker-oldish:
+    <<: *common
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        R_VERSION: "4.0.5"
+    command: ["Rscript", "/opt/jobr/docker/worker.R"]
+    depends_on: [host]
+    environment:
+      JOBR_PASSPHRASE: testbed-alpha-bravo-charlie
+      JOBR_URL: tcp://host:5555
+      JOBR_CORES: "1"
+
+  # R 3.6 is the package floor. It is the version most likely to break
+  # silently, because data.frame() defaulted to stringsAsFactors = TRUE.
+  worker-floor:
+    <<: *common
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        R_VERSION: "3.6.3"
+    command: ["Rscript", "/opt/jobr/docker/worker.R"]
+    depends_on: [host]
+    environment:
+      JOBR_PASSPHRASE: testbed-alpha-bravo-charlie
+      JOBR_URL: tcp://host:5555
+      JOBR_CORES: "1"
+
+networks:
+  jobr:
+    driver: bridge
