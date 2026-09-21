@@ -134,28 +134,32 @@ and is preserved — a passphrase can be read down a phone line. `enrol.R`.
 
 ## What is partially built
 
-### Checking in — the host half exists, the worker half does not
+### Checking in — landed
 
-**This is the significant gap, and it is a live defect.**
+Workers renew the lease on the chunk they are running, at a third of the lease
+interval, so two renewals can be lost before the host gives the work away. The
+host states the lease length when it hands out a chunk, so the two never
+disagree, and only the worker actually holding a lease may renew it.
 
-The design called for clients to check in, and for silence to mean
-unresponsive. The ledger has a `renew` event. `handle_request()` implements the
-`renew` operation. `test-ledger.R` and `test-protocol.R` both cover it.
+This is deliberately **not** a separate UDP heartbeat. The worker already holds
+a socket to the host and uses it for claim and submit, so a renewal is one more
+request on it. A second port — UDP — through a home router, Windows Firewall
+and a corporate egress policy is strictly more deployment friction, which is
+the thing this package is trying to avoid; NNG has no UDP transport for
+request/reply in any case; and the loss tolerance that usually motivates UDP
+heartbeats is already provided by renewing at a third of the lease.
 
-`jobr_join()` never calls it.
+The awkward part was that a worker is single-threaded: while computing a chunk
+it is inside `run_chunk()` and has no opportunity to speak. So `run_chunk()`
+takes a `heartbeat` callback and calls it between jobs when running serially,
+and while polling `mirai::unresolved()` when running across cores. Collecting
+the parallel results with `m[]` would have blocked until the whole chunk
+finished, leaving no such opportunity.
 
-So a worker has no heartbeat. With the default `lease_seconds = 300`, any chunk
-that takes longer than five minutes has its lease expire **while the worker is
-still computing it**. The chunk is handed to someone else and done twice. The
-ledger handles the duplicate correctly — completion is terminal, one result
-wins — so nothing is corrupted, but the work is wasted and the report is
-confusing.
-
-It has not bitten yet only because every workload run so far has had chunks
-measured in seconds. It will bite the first time a real job takes minutes.
-
-The fix is small: renew on a timer while a chunk runs, and let the host treat a
-missed renewal rather than a wall-clock expiry as the signal.
+One limit remains, and it is inherent: a **single job** longer than the lease
+is still beyond reach, because there is no point between jobs at which to
+renew. That is a matter of choosing a chunk size and lease that suit the work,
+not something the heartbeat can fix.
 
 ### Per-worker identity — recorded, never used for liveness
 
@@ -252,8 +256,10 @@ Recorded because they are easy to reintroduce:
 
 ## Open, in rough priority order
 
-1. **Worker heartbeat.** Renew a lease while a chunk runs. The only item here
-   that is a defect rather than an absence.
-2. **Host-served package repo.** One download instead of one per worker.
-3. **Progress and projected finish.** The ledger already has the timestamps.
-4. **Prefetched per-client queues**, if round trips ever start to matter.
+1. **Host-served package repo.** One download instead of one per worker.
+2. **Progress and projected finish.** The ledger already has the timestamps.
+3. **Prefetched per-client queues**, if round trips ever start to matter.
+4. **Abort a chunk whose lease was lost.** A worker told it no longer holds the
+   lease currently finishes the chunk anyway; the submit is a harmless
+   duplicate, but the work is wasted. Stopping early is easy serially and
+   awkward across cores, where the tasks are already in flight.

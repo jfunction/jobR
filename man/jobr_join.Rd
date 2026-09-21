@@ -15,6 +15,7 @@ jobr_join(
   max_chunks = Inf,
   max_seconds = Inf,
   max_failures = 5L,
+  renew_seconds = NULL,
   quiet = FALSE
 )
 }
@@ -44,6 +45,10 @@ donate a bounded amount of work rather than staying until the jobset ends.}
 failures usually mean this machine is misconfigured rather than that the
 work is bad, and a worker that keeps failing hands chunks back to the pool
 indefinitely.}
+
+\item{renew_seconds}{How often to renew the lease on the chunk being
+worked on. Defaults to a third of the lease the host advertises, so two
+renewals can be lost before the chunk is given to someone else.}
 
 \item{quiet}{Suppress progress output.}
 }

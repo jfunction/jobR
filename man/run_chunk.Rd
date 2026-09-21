@@ -4,7 +4,14 @@
 \alias{run_chunk}
 \title{Run one chunk of jobs}
 \usage{
-run_chunk(project_dir, entrypoint, jobs, cores = 1L)
+run_chunk(
+  project_dir,
+  entrypoint,
+  jobs,
+  cores = 1L,
+  heartbeat = NULL,
+  heartbeat_seconds = 60
+)
 }
 \arguments{
 \item{project_dir}{Unpacked project directory.}
@@ -14,6 +21,13 @@ run_chunk(project_dir, entrypoint, jobs, cores = 1L)
 \item{jobs}{A data frame of jobs.}
 
 \item{cores}{Local cores. 1 runs serially; more uses local mirai daemons.}
+
+\item{heartbeat}{Optional zero-argument function called periodically while
+the chunk runs, used by \code{\link[=jobr_join]{jobr_join()}} to renew its lease. A worker is
+single-threaded, so without somewhere to call from during a long chunk
+there is no way to tell the host it is still alive.}
+
+\item{heartbeat_seconds}{How often, at most, to call \code{heartbeat}.}
 }
 \value{
 A list of per-row results, in row order.

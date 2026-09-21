@@ -31,6 +31,9 @@ NULL
 #'   failures usually mean this machine is misconfigured rather than that the
 #'   work is bad, and a worker that keeps failing hands chunks back to the pool
 #'   indefinitely.
+#' @param renew_seconds How often to renew the lease on the chunk being
+#'   worked on. Defaults to a third of the lease the host advertises, so two
+#'   renewals can be lost before the chunk is given to someone else.
 #' @param max_seconds Give up after this long.
 #' @param quiet Suppress progress output.
 #'
@@ -40,7 +43,7 @@ jobr_join <- function(url, passphrase,
                       cache_dir = file.path(tempdir(), "jobr-worker"),
                       tls = NULL, cores = 1L, timeout_ms = 5000,
                       poll_seconds = 2, max_chunks = Inf, max_seconds = Inf,
-                      max_failures = 5L, quiet = FALSE) {
+                      max_failures = 5L, renew_seconds = NULL, quiet = FALSE) {
   sock <- nanonext::socket("req", dial = url, tls = tls)
   on.exit(close(sock), add = TRUE)
   started <- unix_time()
@@ -139,7 +142,26 @@ jobr_join <- function(url, passphrase,
     }
 
     if (!quiet) message("  chunk ", cl$chunk, " (", nrow(cl$jobs), " jobs)")
-    out <- tryCatch(run_chunk(project_dir, hi$entrypoint, cl$jobs, cores = cores),
+
+    # Renew at a third of the lease, so two renewals can be lost before the
+    # host gives the chunk to someone else. The host states the lease length
+    # when it hands out the chunk, so the two never disagree.
+    lease <- if (is.null(cl$lease_seconds)) 300 else cl$lease_seconds
+    every <- if (is.null(renew_seconds)) max(5, lease / 3) else renew_seconds
+    beat <- function() {
+      r <- call(list(op = "renew", token = hi$token, chunk = cl$chunk),
+                fatal = FALSE)
+      # A refusal means the lease lapsed and the chunk now belongs to someone
+      # else. Finishing it is wasted but harmless -- the submit will be a
+      # duplicate, and completion is terminal -- so say so and carry on.
+      if (!is.null(r) && !isTRUE(r$ok) && !quiet) {
+        message("  lost the lease on chunk ", cl$chunk, ": ", r$error)
+      }
+      invisible(NULL)
+    }
+
+    out <- tryCatch(run_chunk(project_dir, hi$entrypoint, cl$jobs, cores = cores,
+                              heartbeat = beat, heartbeat_seconds = every),
                     error = function(e) e)
     if (inherits(out, "error")) {
       # Hand the chunk back rather than submitting a result that is really an
@@ -217,12 +239,28 @@ load_entrypoint <- function(project_dir, entrypoint) {
 #' @param entrypoint Relative path to the entrypoint, from the manifest.
 #' @param jobs A data frame of jobs.
 #' @param cores Local cores. 1 runs serially; more uses local mirai daemons.
+#' @param heartbeat Optional zero-argument function called periodically while
+#'   the chunk runs, used by [jobr_join()] to renew its lease. A worker is
+#'   single-threaded, so without somewhere to call from during a long chunk
+#'   there is no way to tell the host it is still alive.
+#' @param heartbeat_seconds How often, at most, to call `heartbeat`.
 #'
 #' @return A list of per-row results, in row order.
 #' @export
-run_chunk <- function(project_dir, entrypoint, jobs, cores = 1L) {
+run_chunk <- function(project_dir, entrypoint, jobs, cores = 1L,
+                      heartbeat = NULL, heartbeat_seconds = 60) {
   n <- nrow(jobs)
   if (n == 0L) return(list())
+
+  # Rate-limited so that a chunk of ten thousand fast jobs does not send ten
+  # thousand renewals.
+  last_beat <- unix_time()
+  beat <- function() {
+    if (is.null(heartbeat)) return(invisible(NULL))
+    if (unix_time() - last_beat < heartbeat_seconds) return(invisible(NULL))
+    last_beat <<- unix_time()
+    heartbeat()
+  }
 
   # mirai is Suggested. Degrade rather than fail: a machine without it can
   # still contribute, just one job at a time. [jobr_join()] checks this once at
@@ -235,7 +273,14 @@ run_chunk <- function(project_dir, entrypoint, jobs, cores = 1L) {
 
   if (cores <= 1L) {
     runner <- load_entrypoint_cached(project_dir, entrypoint)
-    return(lapply(seq_len(n), function(i) runner(jobs[i, , drop = FALSE])))
+    # Between jobs is the only point a serial worker is free to talk to the
+    # host. A single job longer than the lease is therefore still beyond reach;
+    # that is a limit of the chunk size chosen, not of the heartbeat.
+    return(lapply(seq_len(n), function(i) {
+      out <- runner(jobs[i, , drop = FALSE])
+      beat()
+      out
+    }))
   }
 
   # Within a worker, mirai parallelises across that machine's own cores. The
@@ -282,6 +327,16 @@ run_chunk <- function(project_dir, entrypoint, jobs, cores = 1L) {
                  .jobs = jobs, .load = load_entrypoint, .rng = RNGkind()),
     .compute = "jobr_local"
   )
+
+  # Collecting with m[] would block until the whole chunk finished, leaving no
+  # opportunity to renew. Poll instead, and beat while waiting.
+  if (!is.null(heartbeat)) {
+    repeat {
+      if (!any(as.logical(mirai::unresolved(m)))) break
+      Sys.sleep(min(1, heartbeat_seconds / 4))
+      beat()
+    }
+  }
   results <- m[]
 
   # mirai reports a failed task by RETURNING an errorValue, not by throwing.

@@ -275,3 +275,137 @@ test_that("an occasional chunk failure does not stop a healthy worker", {
   expect_equal(collected(work, "test"), serial_expectation(20), ignore_attr = TRUE)
   expect_true(all(expect_ledger_sane(work, "test", 4)$state == "done"))
 })
+
+# ---- the heartbeat ----------------------------------------------------------
+# A chunk that takes longer than its lease must not be taken away from the
+# worker still computing it. Before renewal was wired up, the lease expired
+# mid-computation and the chunk was silently handed to someone else and done
+# twice. These tests make the chunk deliberately outlive the lease.
+
+# How many times each chunk was handed out. One apiece means nothing was
+# reissued; more means a lease lapsed while somebody was still working.
+assigns_per_chunk <- function(work_dir, jobset, n_chunks) {
+  led <- ledger_open(file.path(work_dir, "ledger.tsv"))
+  ev <- led$events
+  ev <- ev[ev$jobset == jobset & ev$type == "assign", , drop = FALSE]
+  vapply(seq_len(n_chunks), function(k) sum(ev$chunk == k), integer(1))
+}
+
+# Jobs that each take a known wall-clock time, so a chunk can be made longer
+# than the lease on purpose.
+write_slow_project <- function(dir, seconds) {
+  dir.create(file.path(dir, "R"), recursive = TRUE, showWarnings = FALSE)
+  writeLines(c(
+    "run_job <- function(row) {",
+    sprintf("  Sys.sleep(%f)", seconds),
+    "  data.frame(x = row$x, y = row$x * 2, stringsAsFactors = FALSE)",
+    "}"), file.path(dir, "R", "run.R"))
+  writeLines(c("Project: demo", "Entrypoint: R/run.R", "Files: R/run.R"),
+             file.path(dir, "jobR.dcf"))
+  dir
+}
+
+test_that("a chunk outliving its lease is not stolen from a live worker", {
+  skip_unless_integration()
+  work <- tempfile("host-")
+  # 10 jobs of 1s in one chunk = ~10s of work against a 4s lease.
+  proj <- write_slow_project(tempfile("proj-"), seconds = 1)
+  url <- test_url(); phrase <- "hotel-india-juliet-kilo"
+
+  h <- start_host(work, proj, n_jobs = 10, chunksize = 10, url = url,
+                  phrase = phrase, lease = 4, max_seconds = 120)
+  on.exit(kill_quietly(h), add = TRUE)
+  await_host(h)
+
+  a <- bg(function(url, phrase, cache) {
+    jobr_join(url, phrase, cache_dir = cache, quiet = TRUE,
+              renew_seconds = 1, max_seconds = 110)
+  }, list(url = url, phrase = phrase, cache = tempfile("cache-")))
+  on.exit(kill_quietly(a), add = TRUE)
+
+  # A SECOND worker is essential. With only one, a lapsed lease goes unnoticed
+  # because nobody else is there to claim the chunk -- the test would pass
+  # whether or not renewal worked. This one is waiting to pounce.
+  wait_until(function() nchar(paste(readLines(file.path(work, "ledger.tsv"),
+                                              warn = FALSE), collapse = "")) > 60,
+             timeout = 30, what = "first worker to claim the chunk")
+  b <- bg(function(url, phrase, cache) {
+    jobr_join(url, phrase, cache_dir = cache, quiet = TRUE,
+              poll_seconds = 1, max_seconds = 110)
+  }, list(url = url, phrase = phrase, cache = tempfile("cache-")))
+  on.exit(kill_quietly(b), add = TRUE)
+
+  wait_until(function() !a$is_alive() && !b$is_alive(), timeout = 120,
+             what = "both workers to finish")
+
+  expect_equal(collected(work, "test"), serial_expectation(10), ignore_attr = TRUE)
+  # The assertion that discriminates: handed out exactly once. Without renewal
+  # the lease lapses at 4s, worker B claims it, and this becomes 2.
+  expect_equal(assigns_per_chunk(work, "test", 1), 1L)
+})
+
+test_that("successive over-long chunks each stay with the worker running them", {
+  skip_unless_integration()
+  work <- tempfile("host-")
+  proj <- write_slow_project(tempfile("proj-"), seconds = 0.8)
+  url <- test_url(); phrase <- "lima-mike-november-oscar"
+
+  # 3 chunks of 5 x 0.8s = ~4s each, against a 3s lease, with a rival waiting.
+  h <- start_host(work, proj, n_jobs = 15, chunksize = 5, url = url,
+                  phrase = phrase, lease = 3, max_seconds = 150)
+  on.exit(kill_quietly(h), add = TRUE)
+  await_host(h)
+
+  a <- bg(function(url, phrase, cache) {
+    jobr_join(url, phrase, cache_dir = cache, quiet = TRUE,
+              renew_seconds = 1, max_seconds = 140)
+  }, list(url = url, phrase = phrase, cache = tempfile("cache-")))
+  on.exit(kill_quietly(a), add = TRUE)
+  wait_until(function() nchar(paste(readLines(file.path(work, "ledger.tsv"),
+                                              warn = FALSE), collapse = "")) > 60,
+             timeout = 30, what = "first claim")
+
+  b <- bg(function(url, phrase, cache) {
+    jobr_join(url, phrase, cache_dir = cache, quiet = TRUE,
+              renew_seconds = 1, poll_seconds = 1, max_seconds = 140)
+  }, list(url = url, phrase = phrase, cache = tempfile("cache-")))
+  on.exit(kill_quietly(b), add = TRUE)
+
+  wait_until(function() !a$is_alive() && !b$is_alive(), timeout = 150,
+             what = "both workers to finish")
+
+  expect_equal(collected(work, "test"), serial_expectation(15), ignore_attr = TRUE)
+  # Two workers, three chunks, none reissued: each was renewed while it ran.
+  expect_equal(assigns_per_chunk(work, "test", 3), c(1L, 1L, 1L))
+})
+
+test_that("a worker that dies still loses its lease despite having renewed", {
+  skip_unless_integration()
+  work <- tempfile("host-")
+  sentinel <- file.path(tempfile("sent-"), "reached")
+  # Stalls forever inside job 3, having already renewed a few times.
+  proj <- write_demo_project(tempfile("proj-"), stall_at = 3, sentinel = sentinel)
+  url <- test_url(); phrase <- "papa-quebec-romeo-sierra"
+
+  h <- start_host(work, proj, n_jobs = 10, chunksize = 5, url = url,
+                  phrase = phrase, lease = 5, max_seconds = 120)
+  on.exit(kill_quietly(h), add = TRUE)
+  await_host(h)
+
+  victim <- bg(function(url, phrase, cache) {
+    jobr_join(url, phrase, cache_dir = cache, quiet = TRUE,
+              renew_seconds = 1, max_seconds = 110)
+  }, list(url = url, phrase = phrase, cache = tempfile("cache-")))
+  on.exit(kill_quietly(victim), add = TRUE)
+  wait_until(function() file.exists(sentinel), timeout = 60,
+             what = "worker to reach the stall point")
+  victim$kill()
+
+  # Renewal stops when the process dies, so the lease must still lapse.
+  rescuer <- start_worker(url, phrase, max_seconds = 110)
+  on.exit(kill_quietly(rescuer), add = TRUE)
+  wait_until(function() !rescuer$is_alive(), timeout = 120, what = "replacement")
+
+  expect_equal(collected(work, "test"), serial_expectation(10), ignore_attr = TRUE)
+  expect_true(all(expect_ledger_sane(work, "test", 2)$state == "done"))
+})

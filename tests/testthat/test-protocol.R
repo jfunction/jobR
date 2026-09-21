@@ -284,3 +284,66 @@ test_that("hello tells the worker what the host is running", {
   r <- handle_request(h, list(op = "hello", passphrase = "open-sesame-friend-please"))
   expect_equal(r$host_r_version, r_version_string())
 })
+
+# ---- lease renewal ----------------------------------------------------------
+# The heartbeat. Without it a chunk taking longer than the lease has that lease
+# expire while it is still being computed, and the work is silently done twice.
+
+test_that("the lease holder can renew and the lease moves", {
+  h <- demo_host(n = 5, chunksize = 5, lease_seconds = 60)
+  tok <- auth(h)
+  handle_request(h, list(op = "claim", token = tok), now = 1000)
+
+  r <- handle_request(h, list(op = "renew", token = tok, chunk = 1), now = 1050)
+  expect_true(r$ok)
+  expect_equal(r$lease_seconds, 60)
+
+  # Would have lapsed at 1060 without the renewal; now good until 1110.
+  expect_null(handle_request(h, list(op = "claim", token = tok), now = 1100)$chunk)
+  expect_equal(handle_request(h, list(op = "claim", token = tok), now = 1120)$chunk, 1L)
+})
+
+test_that("renewing repeatedly holds a chunk indefinitely", {
+  h <- demo_host(n = 5, chunksize = 5, lease_seconds = 60)
+  tok <- auth(h)
+  handle_request(h, list(op = "claim", token = tok), now = 1000)
+  for (t in seq(1020, 1400, by = 20)) {
+    expect_true(handle_request(h, list(op = "renew", token = tok, chunk = 1), now = t)$ok)
+  }
+  expect_null(handle_request(h, list(op = "claim", token = tok), now = 1440)$chunk)
+})
+
+test_that("a worker that does not hold the lease cannot renew it", {
+  h <- demo_host(n = 5, chunksize = 5, lease_seconds = 60)
+  holder <- auth(h)
+  other  <- auth(h)
+  handle_request(h, list(op = "claim", token = holder), now = 1000)
+
+  r <- handle_request(h, list(op = "renew", token = other, chunk = 1), now = 1030)
+  expect_false(r$ok)
+  expect_match(r$error, "do not hold that lease")
+
+  # And the impostor's attempt did not extend anything.
+  expect_equal(handle_request(h, list(op = "claim", token = other), now = 1070)$chunk, 1L)
+})
+
+test_that("renewing a chunk that is not leased is refused", {
+  h <- demo_host(n = 10, chunksize = 5, lease_seconds = 60)
+  tok <- auth(h)
+  expect_false(handle_request(h, list(op = "renew", token = tok, chunk = 2), now = 1000)$ok)
+
+  handle_request(h, list(op = "claim", token = tok), now = 1000)
+  handle_request(h, list(op = "submit", token = tok, chunk = 1, results = list()), now = 1010)
+  # Completed work is terminal; renewing it must not reopen anything.
+  expect_false(handle_request(h, list(op = "renew", token = tok, chunk = 1), now = 1020)$ok)
+  expect_true(jobset_complete(h$ledger, h$jobset, 2, now = 1030) == FALSE)
+  expect_equal(handle_request(h, list(op = "status", token = tok))$progress$done, 1L)
+})
+
+test_that("renewing an out-of-range chunk is refused, not an error", {
+  h <- demo_host(n = 5, chunksize = 5); tok <- auth(h)
+  for (k in list(0L, 99L, NA_integer_, NULL)) {
+    r <- handle_request(h, list(op = "renew", token = tok, chunk = k))
+    expect_false(r$ok)
+  }
+})

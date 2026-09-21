@@ -153,10 +153,23 @@ handle_request <- function(state, req, now = unix_time()) {
     },
 
     renew = {
-      state$ledger <- ledger_append(state$ledger, "renew", state$jobset,
-                                    req$chunk, worker,
-                                    lease = now + state$lease_seconds, now = now)
-      list(ok = TRUE)
+      # Only the worker actually holding the lease may extend it. Without this
+      # any authenticated worker could keep someone else's chunk alive, which
+      # would defeat the reclaim the lease exists to trigger.
+      st <- chunk_state(state$ledger, state$jobset, state$n_chunks, now)
+      k <- req$chunk
+      held <- !is.null(k) && !is.na(k) && k >= 1L && k <= state$n_chunks &&
+        st$state[k] == "leased" && identical(st$worker[k], worker)
+      if (!held) {
+        # Telling the worker it has lost the lease is useful: it now knows its
+        # current chunk will be redone by someone else.
+        list(ok = FALSE, error = "you do not hold that lease")
+      } else {
+        state$ledger <- ledger_append(state$ledger, "renew", state$jobset,
+                                      k, worker,
+                                      lease = now + state$lease_seconds, now = now)
+        list(ok = TRUE, lease_seconds = state$lease_seconds)
+      }
     },
 
     fail = {
