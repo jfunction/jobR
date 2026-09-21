@@ -130,10 +130,6 @@ die with the host process.
 The original instinct that credentials should be human-transferable was right
 and is preserved — a passphrase can be read down a phone line. `enrol.R`.
 
----
-
-## What is partially built
-
 ### Checking in — landed
 
 Workers renew the lease on the chunk they are running, at a third of the lease
@@ -160,6 +156,10 @@ One limit remains, and it is inherent: a **single job** longer than the lease
 is still beyond reach, because there is no point between jobs at which to
 renew. That is a matter of choosing a chunk size and lease that suit the work,
 not something the heartbeat can fix.
+
+---
+
+## What is partially built
 
 ### Per-worker identity — recorded, never used for liveness
 
