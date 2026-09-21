@@ -16,6 +16,7 @@ jobr_join(
   max_seconds = Inf,
   max_failures = 5L,
   renew_seconds = NULL,
+  use_host_packages = TRUE,
   quiet = FALSE
 )
 }
@@ -49,6 +50,9 @@ indefinitely.}
 \item{renew_seconds}{How often to renew the lease on the chunk being
 worked on. Defaults to a third of the lease the host advertises, so two
 renewals can be lost before the chunk is given to someone else.}
+
+\item{use_host_packages}{When the host serves a package repository, fetch
+missing packages from it rather than from CRAN. FALSE always uses CRAN.}
 
 \item{quiet}{Suppress progress output.}
 }

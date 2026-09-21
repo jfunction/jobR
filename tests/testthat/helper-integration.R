@@ -103,7 +103,10 @@ collected <- function(work_dir, jobset) {
                            pattern = "\\.rds$", full.names = TRUE))
   if (!length(files)) return(NULL)
   rows <- do.call(rbind, lapply(files, function(f) do.call(rbind, readRDS(f))))
-  rows[order(rows$x), , drop = FALSE]
+  rows <- rows[order(rows$x), , drop = FALSE]
+  # A project may return whatever columns it likes; the oracle only compares
+  # the two it put in.
+  rows[, intersect(c("x", "y"), names(rows)), drop = FALSE]
 }
 
 # Invariants that must hold after any run, no matter how it was perturbed.

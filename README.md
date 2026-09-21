@@ -96,6 +96,22 @@ jobR::jobr_benchmark_report(host_results(h))
 #> 2 laptop-a  112       112.1 0.467
 ```
 
+## Workers that are missing packages
+
+jobR ships a project's code but not the R packages it needs, so by default
+every worker installs those from CRAN itself. On a metered or slow link that is
+the real cost of joining, and it is a silly one -- the host already has them.
+
+```r
+h <- host_new("~/mysim", jobs = my_params)
+jobR::host_serve_packages(h)     # downloads once, from CRAN
+jobr_serve(h, "tcp://0.0.0.0:5555")
+```
+
+Workers then fetch what they lack over the same socket they use for work, and
+transfer nothing on a return visit. Declare the dependencies with a `Lockfile`
+line in `jobR.dcf` so the host knows what to stock. See `?repo`.
+
 ## Setting up a project
 
 A project is an ordinary directory with a `jobR.dcf` manifest. Run

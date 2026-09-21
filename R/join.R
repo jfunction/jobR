@@ -34,6 +34,8 @@ NULL
 #' @param renew_seconds How often to renew the lease on the chunk being
 #'   worked on. Defaults to a third of the lease the host advertises, so two
 #'   renewals can be lost before the chunk is given to someone else.
+#' @param use_host_packages When the host serves a package repository, fetch
+#'   missing packages from it rather than from CRAN. FALSE always uses CRAN.
 #' @param max_seconds Give up after this long.
 #' @param quiet Suppress progress output.
 #'
@@ -43,7 +45,8 @@ jobr_join <- function(url, passphrase,
                       cache_dir = file.path(tempdir(), "jobr-worker"),
                       tls = NULL, cores = 1L, timeout_ms = 5000,
                       poll_seconds = 2, max_chunks = Inf, max_seconds = Inf,
-                      max_failures = 5L, renew_seconds = NULL, quiet = FALSE) {
+                      max_failures = 5L, renew_seconds = NULL,
+                      use_host_packages = TRUE, quiet = FALSE) {
   sock <- nanonext::socket("req", dial = url, tls = tls)
   on.exit(close(sock), add = TRUE)
   started <- unix_time()
@@ -82,6 +85,24 @@ jobr_join <- function(url, passphrase,
   if (!quiet) for (w in version_skew_warnings(hi$host_r_version)) message("note: ", w)
 
   missing <- packages_missing(hi$packages)
+  if (length(missing) && isTRUE(hi$serves_packages) && use_host_packages) {
+    # The host has these packages already and is on the other end of this very
+    # socket. Fetching from it beats every worker pulling the same bytes from
+    # CRAN, which on a metered or slow link is the real cost of joining.
+    if (!quiet) {
+      message("missing ", length(missing), " package(s); fetching from the ",
+              "host rather than CRAN")
+    }
+    missing <- tryCatch(
+      repo_pull_install(call, missing, file.path(cache_dir, "repo"),
+                        token = hi$token, quiet = quiet),
+      error = function(e) {
+        if (!quiet) message("  could not install from the host: ",
+                            conditionMessage(e))
+        missing
+      }
+    )
+  }
   if (length(missing)) {
     stop("this machine is missing packages the project needs: ",
          paste(missing, collapse = ", "),
@@ -371,4 +392,54 @@ load_entrypoint_cached <- function(project_dir, entrypoint) {
     assign(key, runner, envir = .runner_cache)
   }
   runner
+}
+
+#' Fetch a host's package repository and install from it
+#'
+#' Reassembles the host's repository locally, transferring only the files this
+#' machine does not already have, then installs with `repos = "file:///..."` so
+#' R's own resolution and version checking apply rather than anything invented
+#' here.
+#'
+#' @param call A function taking a request list and returning the host's reply,
+#'   as [jobr_join()] uses internally.
+#' @param packages Packages still needed.
+#' @param dir Where to assemble the local copy. Kept between joins, so a second
+#'   visit transfers nothing.
+#' @param token The session token from enrolment; the repository operations are
+#'   authenticated like every other one.
+#' @param lib Library to install into.
+#' @param quiet Suppress progress.
+#'
+#' @return The packages still missing afterwards.
+#' @export
+repo_pull_install <- function(call, packages, dir, token = NULL,
+                              lib = .libPaths()[1], quiet = FALSE) {
+  reply <- call(list(op = "repo_manifest", token = token))
+  if (is.null(reply) || !isTRUE(reply$ok) || !NROW(reply$manifest)) {
+    return(packages)
+  }
+  plan <- repo_sync_plan(reply$manifest, dir)
+  if (nrow(plan) && !quiet) {
+    message("  fetching ", nrow(plan), " file(s), ",
+            format(round(sum(plan$size) / 1024^2, 1), nsmall = 1), " MB")
+  }
+  for (i in seq_len(nrow(plan))) {
+    got <- call(list(op = "repo_file", token = token, path = plan$path[i]))
+    if (is.null(got) || !isTRUE(got$ok)) {
+      stop("host refused ", plan$path[i], ": ",
+           if (is.null(got)) "no reply" else got$error, call. = FALSE)
+    }
+    target <- file.path(dir, plan$path[i])
+    dir.create(dirname(target), recursive = TRUE, showWarnings = FALSE)
+    writeBin(got$data, target)
+    # Verified on arrival. A truncated package would otherwise fail later, deep
+    # inside install.packages, with a far less obvious message.
+    if (!identical(digest::digest(file = target, algo = "sha256"),
+                   plan$sha256[i])) {
+      unlink(target)
+      stop("checksum mismatch on ", plan$path[i], call. = FALSE)
+    }
+  }
+  repo_install(packages, dir, lib = lib, quiet = quiet)
 }

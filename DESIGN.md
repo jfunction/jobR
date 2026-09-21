@@ -157,6 +157,33 @@ is still beyond reach, because there is no point between jobs at which to
 renew. That is a matter of choosing a chunk size and lease that suit the work,
 not something the heartbeat can fix.
 
+### Host-served package repository — landed
+
+Not part of the original design, but it belongs to the same idea: the host
+already has the packages, and every worker was downloading them again from
+CRAN over its own connection.
+
+`host_serve_packages()` stocks a CRAN-shaped repository under the host's work
+directory -- `src/contrib` and `bin/<platform>/contrib/<R series>` trees with
+`PACKAGES` indexes written by `tools::write_PACKAGES()`. Workers fetch it over
+the same socket they use for work, reassemble it locally, and install with
+`repos = "file:///..."`, so R's own dependency resolution and version checking
+apply and nothing here reimplements them.
+
+Only files the worker does not already have are transferred, matched by
+sha256, so a second visit costs one small message. A path arriving from a
+worker is guarded twice: structurally, and against the host's own manifest as
+a whitelist rather than a blacklist.
+
+One repository can serve several R versions at once, because R reads only the
+directory matching its own series. Sources are stocked always and work
+anywhere but need a toolchain; binaries need none but must match. CRAN only
+builds binaries for the current R and the one before, so a worker on an older
+R is offered sources -- a limit of CRAN, not of this code.
+
+It is deliberately explicit rather than automatic: it reaches out to CRAN and
+can take a while, which should not happen as a side effect of starting a host.
+
 ---
 
 ## What is partially built
@@ -210,15 +237,6 @@ projects, with clients browsing them. A host now serves exactly one project and
 one jobset. Starting a second host for a second project costs one R session,
 which for the target deployment is cheaper than the multiplexing.
 
-### Host-served package repository
-
-Not part of the original design, but it belongs here: a worker must install the
-project's R packages itself, from CRAN, over its own connection. The host
-already has those packages. On a metered link, four workers each pulling from
-CRAN is four times the traffic it needs to be.
-
----
-
 ## Where the current design deliberately diverges
 
 **HTTP → nanonext.** The original planned a plumber REST API. The rebuild uses
@@ -256,7 +274,11 @@ Recorded because they are easy to reintroduce:
 
 ## Open, in rough priority order
 
-1. **Host-served package repo.** One download instead of one per worker.
+1. **A heartbeat that survives a long single job.** The current one renews
+   between jobs, so a job longer than the lease is still beyond reach. Needs
+   something that can renew while a call is in flight -- async, promises, or a
+   background process. Blocking for workloads with minutes-long jobs, such as
+   a model run inside a sensitivity analysis.
 2. **Progress and projected finish.** The ledger already has the timestamps.
 3. **Prefetched per-client queues**, if round trips ever start to matter.
 4. **Abort a chunk whose lease was lost.** A worker told it no longer holds the

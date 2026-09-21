@@ -409,3 +409,75 @@ test_that("a worker that dies still loses its lease despite having renewed", {
   expect_equal(collected(work, "test"), serial_expectation(10), ignore_attr = TRUE)
   expect_true(all(expect_ledger_sane(work, "test", 2)$state == "done"))
 })
+
+# ---- the host-served package repository -------------------------------------
+# The point of the feature: the host downloads a package once, and workers get
+# it over the LAN instead of each visiting CRAN. Proven by giving the worker a
+# private, empty library so it genuinely does not have the package.
+
+test_that("a worker installs a missing package from the host, not CRAN", {
+  skip_unless_integration()
+  reachable <- tryCatch(
+    nrow(utils::available.packages(repos = "https://cloud.r-project.org",
+                                   type = "source")) > 0,
+    error = function(e) FALSE, warning = function(w) FALSE)
+  skip_if_not(isTRUE(reachable), "no CRAN access to stock the host")
+
+  # Choose a package this machine does NOT already have. Hard-coding one is how
+  # the first version of this test fooled itself: praise turned out to be
+  # installed, so the worker never needed the host and the test passed for the
+  # wrong reason. All candidates are tiny and dependency-free.
+  # Ordered obscure-first, so a well-stocked development machine still finds
+  # one free. A fresh CI runner will take the first.
+  candidates <- c("fortunes", "zeallot", "whisker", "praise", "brew", "bitops",
+                  "ini", "prettyunits", "rprojroot", "crayon", "R6")
+  have <- rownames(utils::installed.packages())
+  pkg <- setdiff(candidates, have)[1]
+  skip_if(is.na(pkg), "every candidate package is already installed here")
+
+  work <- tempfile("host-")
+  proj <- tempfile("proj-"); dir.create(file.path(proj, "R"), recursive = TRUE)
+  # requireNamespace rather than a specific call, so any candidate works.
+  writeLines(c(
+    sprintf("PKG <- %s", deparse(pkg)),
+    "run_job <- function(row) {",
+    "  data.frame(x = row$x, y = row$x * 2,",
+    "             dep = requireNamespace(PKG, quietly = TRUE),",
+    "             stringsAsFactors = FALSE)",
+    "}"), file.path(proj, "R", "run.R"))
+  writeLines(c("Project: needsdep", "Entrypoint: R/run.R", "Files: R/run.R",
+               "Lockfile: renv.lock"), file.path(proj, "jobR.dcf"))
+  writeLines(sprintf('{ "Packages": { "%s": { "Package": "%s" } } }', pkg, pkg),
+             file.path(proj, "renv.lock"))
+
+  url <- test_url(); phrase <- "sierra-tango-uniform-victor"
+  ready <- tempfile("ready-")
+
+  # The host stocks the repository before serving, as a user would.
+  h <- bg(function(proj, work, url, phrase, ready) {
+    hst <- host_new(proj, jobs = data.frame(x = 1:6), chunksize = 3,
+                    passphrase = phrase, work_dir = work, jobset = "test")
+    host_serve_packages(hst, types = "source", quiet = TRUE)
+    jobr_serve(hst, url, max_seconds = 240, ready_file = ready, quiet = TRUE)
+  }, list(proj = proj, work = work, url = url, phrase = phrase, ready = ready))
+  on.exit(kill_quietly(h), add = TRUE)
+  wait_until(function() file.exists(ready), timeout = 180,
+             what = "host to stock its repository and bind")
+  expect_gt(nrow(repo_manifest(repo_path(work))), 0)
+
+  # The worker installs into a private library, so a success there proves the
+  # package arrived over the socket rather than already being present.
+  wlib <- tempfile("wlib-"); dir.create(wlib, recursive = TRUE)
+  w <- bg(function(url, phrase, cache, wlib, pkg) {
+    .libPaths(c(wlib, .libPaths()))
+    jobr_join(url, phrase, cache_dir = cache, quiet = FALSE, max_seconds = 200)
+  }, list(url = url, phrase = phrase, cache = tempfile("cache-"),
+          wlib = wlib, pkg = pkg))
+  on.exit(kill_quietly(w), add = TRUE)
+  wait_until(function() !w$is_alive(), timeout = 240, what = "worker to finish")
+
+  out <- paste(w$read_all_error_lines(), collapse = " ")
+  expect_match(out, "fetching from the host")
+  expect_true(pkg %in% rownames(utils::installed.packages(lib.loc = wlib)))
+  expect_equal(collected(work, "test"), serial_expectation(6), ignore_attr = TRUE)
+})

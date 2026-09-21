@@ -347,3 +347,86 @@ test_that("renewing an out-of-range chunk is refused, not an error", {
     expect_false(r$ok)
   }
 })
+
+# ---- the package repository -------------------------------------------------
+# The host serves package files over the same socket. A path arriving from a
+# worker names a file the host will read and hand back, so it is guarded twice:
+# structurally, and against the host's own manifest as a whitelist.
+
+stocked_host <- function(files = c("src/contrib/PACKAGES",
+                                   "src/contrib/praise_1.0.0.tar.gz")) {
+  h <- demo_host()
+  repo <- repo_path(h$work_dir)
+  for (f in files) {
+    p <- file.path(repo, f)
+    dir.create(dirname(p), recursive = TRUE, showWarnings = FALSE)
+    writeLines(paste("contents of", f), p)
+  }
+  h
+}
+
+test_that("a host with no repository does not advertise one", {
+  h <- demo_host()
+  r <- handle_request(h, list(op = "hello", passphrase = "open-sesame-friend-please"))
+  expect_false(r$serves_packages)
+})
+
+test_that("a stocked host advertises its repository", {
+  h <- stocked_host()
+  r <- handle_request(h, list(op = "hello", passphrase = "open-sesame-friend-please"))
+  expect_true(r$serves_packages)
+})
+
+test_that("the manifest lists what is on the shelves", {
+  h <- stocked_host(); tok <- auth(h)
+  r <- handle_request(h, list(op = "repo_manifest", token = tok))
+  expect_true(r$ok)
+  expect_setequal(r$manifest$path,
+                  c("src/contrib/PACKAGES", "src/contrib/praise_1.0.0.tar.gz"))
+})
+
+test_that("an advertised file is served as raw bytes", {
+  h <- stocked_host(); tok <- auth(h)
+  r <- handle_request(h, list(op = "repo_file", token = tok,
+                              path = "src/contrib/PACKAGES"))
+  expect_true(r$ok)
+  expect_true(is.raw(r$data))
+  expect_match(rawToChar(r$data), "contents of src/contrib/PACKAGES")
+})
+
+test_that("path traversal is refused", {
+  h <- stocked_host(); tok <- auth(h)
+  # A real secret to try to steal: the ledger sits just outside the repo root.
+  for (p in c("../ledger.tsv", "../../etc/passwd", "src/contrib/../../bundle.zip",
+              "/etc/passwd", "C:/Windows/win.ini", "~/.ssh/id_rsa")) {
+    r <- handle_request(h, list(op = "repo_file", token = tok, path = p))
+    expect_false(r$ok, info = p)
+    expect_match(r$error, "no such file", info = p)
+  }
+})
+
+test_that("a file that exists but is not advertised is refused", {
+  # The whitelist, not just the path check: bundle.zip is a perfectly ordinary
+  # relative path, and it is still none of a worker's business here.
+  h <- stocked_host(); tok <- auth(h)
+  r <- handle_request(h, list(op = "repo_file", token = tok, path = "bundle.zip"))
+  expect_false(r$ok)
+})
+
+test_that("repository operations require authentication", {
+  h <- stocked_host()
+  for (op in c("repo_manifest", "repo_file")) {
+    r <- handle_request(h, list(op = op, path = "src/contrib/PACKAGES"))
+    expect_false(r$ok, info = op)
+    expect_match(r$error, "not authenticated", info = op)
+  }
+})
+
+test_that("a missing or malformed path is refused rather than erroring", {
+  h <- stocked_host(); tok <- auth(h)
+  expect_false(handle_request(h, list(op = "repo_file", token = tok))$ok)
+  expect_false(handle_request(h, list(op = "repo_file", token = tok,
+                                      path = NA_character_))$ok)
+  expect_false(handle_request(h, list(op = "repo_file", token = tok,
+                                      path = ""))$ok)
+})

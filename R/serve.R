@@ -103,7 +103,9 @@ handle_request <- function(state, req, now = unix_time()) {
       entrypoint = state$bundle$manifest$entrypoint,
       hash = state$bundle$hash, packages = state$bundle$packages,
       n_chunks = state$n_chunks, n_jobs = nrow(state$jobs),
-      host_r_version = r_version_string()
+      host_r_version = r_version_string(),
+      # Whether it is worth asking for packages at all.
+      serves_packages = nrow(repo_manifest(repo_path(state$work_dir))) > 0L
     ))
   }
 
@@ -176,6 +178,24 @@ handle_request <- function(state, req, now = unix_time()) {
       state$ledger <- ledger_append(state$ledger, "fail", state$jobset,
                                     req$chunk, worker, now = now)
       list(ok = TRUE)
+    },
+
+    # What the host has on its shelves. Small: paths, sizes and hashes only.
+    repo_manifest = list(ok = TRUE, manifest = repo_manifest(repo_path(state$work_dir))),
+
+    repo_file = {
+      # Two locks. The path must be structurally safe, AND it must be one the
+      # host is actually advertising -- a whitelist drawn from its own
+      # manifest, rather than a blacklist of things that look dangerous.
+      man <- repo_manifest(repo_path(state$work_dir))
+      p <- req$path
+      if (!repo_path_ok(p) || !isTRUE(p %in% man$path)) {
+        list(ok = FALSE, error = "no such file in the repository")
+      } else {
+        f <- file.path(repo_path(state$work_dir), p)
+        list(ok = TRUE, path = p,
+             data = readBin(f, "raw", n = file.info(f)$size))
+      }
     },
 
     status = list(
