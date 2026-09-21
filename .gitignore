@@ -4,9 +4,8 @@
 .RData
 .Ruserdata
 
-# renv is no longer used: DESCRIPTION declares dependencies directly, and
-# renv belongs to projects rather than packages. Left on disk so nothing is
-# lost -- delete the renv/ directory to reclaim the space.
+# renv is not used: DESCRIPTION declares dependencies directly, and renv
+# belongs to projects rather than packages.
 renv/
 renv.lock
 
@@ -14,7 +13,8 @@ renv.lock
 *.tar.gz
 *.Rcheck/
 
-# superseded scratch from the 2022 prototype, kept on disk but not tracked
+# superseded scratch from the 2022 prototype. Their intent is recorded in
+# DESIGN.md; the code is in git history and in R/enrol.R.
 misc/
 sampleSession.R
 
