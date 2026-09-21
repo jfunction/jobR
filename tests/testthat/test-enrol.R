@@ -1,7 +1,32 @@
-test_that("passphrases have the requested shape", {
-  p <- passphrase_new(4)
-  expect_length(passphrase_words(p), 4)
-  expect_match(p, "^[a-z]+(-[a-z]+){3}$")
+# The wordlist contains four hyphenated words (drop-down, felt-tip, t-shirt,
+# yo-yo). A passphrase is hyphen-separated, so drawing one used to make a
+# four-word phrase read as five and break the round trip -- about 1 in 486
+# passphrases, which is exactly the rate at which a bug stays hidden. These
+# tests draw many rather than one.
+
+test_that("passphrases have the requested shape, every time", {
+  for (n in c(3, 4, 6)) {
+    for (i in 1:200) {
+      p <- passphrase_new(n)
+      expect_length(passphrase_words(p), n)
+      expect_match(p, sprintf("^[a-z]+(-[a-z]+){%d}$", n - 1L))
+    }
+  }
+})
+
+test_that("no usable word contains the separator", {
+  words <- passphrase_wordlist()
+  expect_gt(length(words), 7000)
+  expect_false(any(grepl("-", words, fixed = TRUE)))
+  expect_true(all(grepl("^[a-z]+$", words)))
+})
+
+test_that("a passphrase round-trips through split and rejoin", {
+  for (i in 1:200) {
+    p <- passphrase_new(4)
+    expect_equal(paste(passphrase_words(p), collapse = "-"), p)
+    expect_true(passphrase_equal(p, p))
+  }
 })
 
 test_that("passphrases do not repeat", {

@@ -128,5 +128,13 @@ passphrase_wordlist <- function() {
   )
   if (is.null(wl)) wl <- get0("passphraseWords", envir = globalenv(), ifnotfound = NULL)
   if (is.null(wl)) stop("passphrase wordlist unavailable", call. = FALSE)
-  unique(wl$word)
+  words <- unique(wl$word)
+
+  # Four of the EFF words contain a hyphen: drop-down, felt-tip, t-shirt and
+  # yo-yo. A passphrase is itself hyphen-separated, so drawing one makes the
+  # separator ambiguous -- a four-word passphrase reads as five, and splitting
+  # it does not round-trip. That matters precisely because this credential is
+  # meant to be read aloud. Dropping them costs 4 words out of 7776, which is
+  # 0.0007 of a bit.
+  words[grepl("^[a-z]+$", words)]
 }
