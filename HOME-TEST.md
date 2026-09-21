@@ -26,6 +26,10 @@ R CMD INSTALL jobR_0.2.0.tar.gz
 
 Keep `jobR_0.2.0.tar.gz` — you will copy it to laptop B in step 3.
 
+If the install fails with `Permission denied` on a file R just created, that is
+antivirus, not the package, and it is intermittent — see
+["If the install fails"](#if-the-install-fails-with-permission-denied) in step 3.
+
 Confirm it works locally before involving the network:
 
 ```r
@@ -139,6 +143,48 @@ install.packages("~/Downloads/jobR_0.2.0.tar.gz", repos = NULL, type = "source")
 
 Laptop B needs jobR itself, and any packages your *project* uses. It does not
 need the project's code: that travels automatically.
+
+### If the install fails with "Permission denied"
+
+On Windows — especially a managed or work laptop — an install can fail like
+this, on a file R created a fraction of a second earlier:
+
+```
+Error in lazyLoadDBinsertListElement(...) :
+  cannot open file '.../00LOCK-jobR/00new/jobR/help/jobR.rdb': Permission denied
+ERROR: installing Rd objects failed for package 'jobR'
+```
+
+Nothing is wrong with the package. An on-access scanner — Defender, or
+corporate endpoint protection — opens newly written files to inspect them, and
+for a moment R cannot reopen its own file. It is intermittent: the same command
+run three times in a row will typically succeed, fail, then succeed.
+
+**Just try again.** If you would rather not play dice:
+
+```r
+# Retry a few times; each attempt is independent of the last.
+for (i in 1:5) {
+  try(install.packages("jobR_0.2.0.tar.gz", repos = NULL, type = "source"),
+      silent = TRUE)
+  if (nzchar(system.file(package = "jobR"))) break
+  Sys.sleep(2)
+}
+packageVersion("jobR")
+```
+
+The proper fix is an antivirus exclusion for your R library directory
+(`.libPaths()[1]`), which on a work machine usually means asking IT. Worth it
+if you install packages often; not worth it for one test.
+
+Do **not** reach for `R CMD INSTALL --no-help` to dodge it. That skips building
+the help database, which is the step that fails — but it also throws away
+`?jobR.dcf` and `?versions`, and those are the two pages you are most likely to
+want while setting this up.
+
+This same scanner behaviour is why jobR retries its own ledger writes; see
+`?ledger`. The running system already handles it. Only installation does not,
+because that happens before jobR is there to defend itself.
 
 ## 4. Size the run
 
@@ -312,4 +358,5 @@ is wrong before anyone else has to find out.
 | Host says `port could not be bound` | Something else is on 5555; pick another port |
 | Worker does nothing, host shows no progress | Check they are on the same subnet: both addresses should start the same, e.g. `192.168.1.` |
 | `nanonext` will not install on the worker | R older than 4.0 -- see step 3 |
+| Install fails: `Permission denied` on `jobR.rdb` | Antivirus holding a just-written file; intermittent, just retry -- see step 3 |
 | Results have factors where you expected strings | A worker on R 3.6 and a missing `stringsAsFactors = FALSE` -- see "Mismatched R versions" |
