@@ -234,8 +234,8 @@ claim_chunk <- function(led, jobset, n_chunks, worker,
     return(list(chunk = NULL, ledger = led))
   }
   ever <- unique(led$events$chunk[led$events$jobset == jobset])
-  virgin <- setdiff(open, ever)
-  chunk <- if (length(virgin)) min(virgin) else min(open)
+  unattempted <- setdiff(open, ever)
+  chunk <- if (length(unattempted)) min(unattempted) else min(open)
   led <- ledger_append(led, "assign", jobset, chunk, worker,
                        lease = now + lease_seconds, now = now)
   list(chunk = chunk, ledger = led)

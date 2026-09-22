@@ -28,11 +28,18 @@ out.
 
 The R ecosystem solved distributed compute well, but it solved it for people
 with institutional infrastructure. `crew` has launcher plugins for SLURM, SGE,
-LSF, PBS and AWS Batch. It has none for "four laptops and a switch". That gap is
-structural rather than accidental: in [crew discussion #191][d191] the
-maintainer agrees the demand is obvious and explains he cannot build it, because
-his own workplace restricts SSH and Docker enough that he cannot develop against
-it. People with SLURM allocations do not write software for people without them.
+LSF, PBS and AWS Batch. It has none for "four laptops and a switch".
+
+[crew discussion #191][d191] asks for exactly that, and it is worth reading in
+full. The maintainer engages with it at length, explores building it on mirai's
+SSH support, explains why that does not fit `crew`'s architecture — `crew` opens
+a listening socket and lets workers dial in later, while `mirai::daemons(remote
+= )` takes responsibility for launching them — and concludes that he cannot
+develop it himself, since his workplace prohibits SSH tunnelling into its
+resources. He points to the plugin documentation for anyone who can.
+
+That is a gap of circumstance rather than of interest, and it is the kind that
+persists: the people best placed to build this are the least likely to need it.
 
 So jobR targets the case that ecosystem leaves out:
 
@@ -52,16 +59,22 @@ So jobR targets the case that ecosystem leaves out:
 jobR does not reimplement parallel computing, and you should not use it where
 `mirai` or `crew` already fit. The split is:
 
-- **`mirai` moves work between cores.** Each jobR worker uses it locally, via
-  `jobr_join(cores = 4)`, to use its own machine fully.
-- **jobR moves work between machines**, and adds the operator envelope that
-  `mirai` deliberately does not have: enrolment, code integrity, a durable
-  ledger, and requeue-on-disconnect.
+- **`mirai` reaches machines you have credentials for.** Each jobR worker uses
+  it locally, via `jobr_join(cores = 4)`, to use its own machine fully. It also
+  goes further than that on its own: `mirai::daemons(remote = ssh_config())`
+  starts daemons on remote hosts over SSH, tunnelled, anywhere you have SSH
+  access.
+- **jobR inverts the direction.** Workers dial *in* with a spoken passphrase, so
+  you need no account, no key and no inbound access on somebody else's laptop.
+  On top of that it adds the operator envelope `mirai` deliberately does not
+  have: enrolment, code integrity, a durable ledger, and requeue-on-disconnect.
 
-If your machines are already a SLURM cluster, use `crew`. If your host session
-will reliably stay alive and everyone already has the packages, plain `mirai` is
-simpler and faster. jobR earns its place when workers are unreliable and the
-people running them should not have to be told what to install.
+If your machines are already a SLURM cluster, use `crew`. If you hold SSH
+credentials for every machine involved, your host session will reliably stay
+alive, and everyone already has the packages, plain `mirai` is simpler and
+faster. jobR earns its place when the machines are not yours to log into,
+workers are unreliable, and the people running them should not have to be told
+what to install.
 
 ## Trying it on two machines
 
