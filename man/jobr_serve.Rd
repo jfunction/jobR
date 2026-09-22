@@ -10,6 +10,7 @@ jobr_serve(
   tls = NULL,
   timeout_ms = 1000,
   max_seconds = Inf,
+  linger_seconds = 30,
   ready_file = NULL,
   quiet = FALSE
 )
@@ -24,6 +25,13 @@ jobr_serve(
 \item{timeout_ms}{How long to block waiting for each request.}
 
 \item{max_seconds}{Stop after this long regardless of progress.}
+
+\item{linger_seconds}{How long to keep answering after the last chunk is
+done, so that workers can learn the jobset finished instead of inferring
+it from silence. The host stops as soon as every enrolled worker has been
+told, so a normal run does not wait this out; it is a cap for workers
+that are not coming back. Setting it to 0 restores the old behaviour of
+shutting down the instant the work is complete.}
 
 \item{ready_file}{Optional path written once the socket is actually bound,
 and removed on exit. Supervisors and tests need an observable readiness

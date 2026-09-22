@@ -58,6 +58,7 @@ repeat {
 res <- jobr_join(url, phrase, cores = cores,
                  cache_dir = file.path(tempdir(), "jobr-worker"),
                  timeout_ms = env_num("JOBR_TIMEOUT_MS", 5000),
+                 reconnect_seconds = env_num("JOBR_RECONNECT_SECONDS", 60),
                  max_chunks = env_num("JOBR_MAX_CHUNKS", Inf),
                  max_seconds = env_num("JOBR_MAX_SECONDS", 280), quiet = FALSE)
 message("worker done: ", res$chunks_done, " chunks")

@@ -27,7 +27,29 @@ skip_unless_integration <- function() {
   testthat::skip_if_not_installed("callr")
 }
 
-pkg_root <- function() normalizePath(testthat::test_path("..", ".."), mustWork = TRUE)
+# The checkout, if these tests are running from one. Walks up rather than
+# assuming a fixed depth, and returns NULL when there is no source tree to
+# find -- which is the case under `R CMD check`, where the tests run inside
+# <pkg>.Rcheck and the only jobR that exists is the installed one.
+#
+# Getting this wrong is silent and total: every background process dies on its
+# first line, no host ever binds its socket, and all thirteen integration
+# tests fail with the same timeout, which reads like a broken package rather
+# than a test helper looking in the wrong place.
+pkg_root <- function() {
+  d <- normalizePath(testthat::test_path("."), mustWork = FALSE)
+  for (i in 1:5) {
+    if (file.exists(file.path(d, "DESCRIPTION")) &&
+        dir.exists(file.path(d, "R")) &&
+        file.exists(file.path(d, "data", "passphraseWords.rda"))) {
+      return(d)
+    }
+    up <- dirname(d)
+    if (identical(up, d)) break
+    d <- up
+  }
+  NULL
+}
 
 # Ports are drawn from a high range and bumped per use. Two concurrent test
 # runs on one machine would otherwise collide and produce confusing failures.
@@ -41,14 +63,21 @@ pkg_root <- function() normalizePath(testthat::test_path("..", ".."), mustWork =
 
 test_url <- function() sprintf("tcp://127.0.0.1:%d", .port())
 
-# Run a function in a fresh R process with the package sourced from the
-# checkout. Used instead of installing, so tests run against working-tree code.
+# Run a function in a fresh R process with jobR available in the global
+# environment. Sources the checkout when there is one, so tests run against
+# working-tree code without installing; falls back to the installed package
+# under `R CMD check`, where there is no checkout to source and the package
+# being checked is the point anyway.
 bg <- function(f, args = list()) {
   callr::r_bg(
     func = function(root, f, args) {
-      load(file.path(root, "data", "passphraseWords.rda"), envir = globalenv())
-      for (fl in list.files(file.path(root, "R"), full.names = TRUE)) {
-        source(fl, local = FALSE)
+      if (is.null(root)) {
+        library(jobR)
+      } else {
+        load(file.path(root, "data", "passphraseWords.rda"), envir = globalenv())
+        for (fl in list.files(file.path(root, "R"), full.names = TRUE)) {
+          source(fl, local = FALSE)
+        }
       }
       do.call(f, args, envir = globalenv())
     },

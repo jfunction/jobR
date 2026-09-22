@@ -430,3 +430,106 @@ test_that("a missing or malformed path is refused rather than erroring", {
   expect_false(handle_request(h, list(op = "repo_file", token = tok,
                                       path = ""))$ok)
 })
+
+# ---- knowing when everyone has been told ------------------------------------
+# The host used to shut down the instant the last chunk landed, which made a
+# normal ending indistinguishable from a dead link: the last worker to ask for
+# work got silence, and silence is also what a partition looks like. A worker
+# cannot retry its way out of that ambiguity. So the host now tracks which
+# workers have actually been told, in a reply they received, that the work is
+# finished -- and only those workers.
+
+test_that("nobody is farewelled while there is still work", {
+  h <- demo_host(n = 10, chunksize = 5)
+  t1 <- auth(h)
+  handle_request(h, list(op = "claim", token = t1))
+  expect_length(h$farewelled, 0L)
+})
+
+test_that("the worker that submits the last chunk is told, and recorded", {
+  h <- demo_host(n = 10, chunksize = 5)
+  t1 <- auth(h)
+  for (i in 1:2) {
+    cl <- handle_request(h, list(op = "claim", token = t1))
+    r <- handle_request(h, list(op = "submit", token = t1, chunk = cl$chunk,
+                                results = list(1)))
+  }
+  expect_true(r$done)
+  expect_equal(h$farewelled, substr(t1, 1, 8))
+})
+
+test_that("a worker that asks for work after the end is told, and recorded", {
+  h <- demo_host(n = 10, chunksize = 5)
+  t1 <- auth(h); t2 <- auth(h)
+  for (i in 1:2) {
+    cl <- handle_request(h, list(op = "claim", token = t1))
+    handle_request(h, list(op = "submit", token = t1, chunk = cl$chunk,
+                           results = list(1)))
+  }
+  # t2 never did any work, so it has not been told anything yet.
+  expect_false(substr(t2, 1, 8) %in% h$farewelled)
+
+  r <- handle_request(h, list(op = "claim", token = t2))
+  expect_true(r$done)
+  expect_null(r$chunk)
+  expect_true(substr(t2, 1, 8) %in% h$farewelled)
+})
+
+test_that("a worker can say goodbye so the host stops waiting for it", {
+  h <- demo_host(n = 10, chunksize = 5)
+  t1 <- auth(h)
+  r <- handle_request(h, list(op = "bye", token = t1))
+  expect_true(r$ok)
+  expect_equal(h$farewelled, substr(t1, 1, 8))
+})
+
+test_that("saying goodbye twice is not an error and does not duplicate", {
+  h <- demo_host()
+  t1 <- auth(h)
+  handle_request(h, list(op = "bye", token = t1))
+  handle_request(h, list(op = "bye", token = t1))
+  expect_length(h$farewelled, 1L)
+})
+
+test_that("goodbye requires authentication", {
+  h <- demo_host()
+  r <- handle_request(h, list(op = "bye", token = "not-a-token"))
+  expect_false(r$ok)
+  expect_length(h$farewelled, 0L)
+})
+
+test_that("a duplicate submit from a worker that was presumed lost is accepted", {
+  # What happens when a partitioned worker comes back: its lease lapsed, the
+  # chunk was reissued and finished by someone else, and now it delivers the
+  # work it had already done. Completion is terminal, so this must not reopen
+  # anything or change the count.
+  h <- demo_host(n = 10, chunksize = 5)
+  t1 <- auth(h); t2 <- auth(h)
+  cl <- handle_request(h, list(op = "claim", token = t1))
+  handle_request(h, list(op = "submit", token = t1, chunk = cl$chunk,
+                         results = list("first")))
+  before <- ledger_progress(h$ledger, h$jobset, h$n_chunks)
+
+  r <- handle_request(h, list(op = "submit", token = t2, chunk = cl$chunk,
+                              results = list("late")))
+  expect_true(r$ok)
+  expect_equal(ledger_progress(h$ledger, h$jobset, h$n_chunks), before)
+})
+
+test_that("the submit that finishes a jobset says so in its reply", {
+  # The worker relies on this to stop without asking again. Asking again would
+  # be answered by silence -- from a host that shut down because everything
+  # went right -- and the worker would spend its whole reconnect budget
+  # working that out.
+  h <- demo_host(n = 10, chunksize = 5)
+  t1 <- auth(h)
+  cl <- handle_request(h, list(op = "claim", token = t1))
+  first <- handle_request(h, list(op = "submit", token = t1, chunk = cl$chunk,
+                                  results = list(1)))
+  expect_false(first$done)
+
+  cl <- handle_request(h, list(op = "claim", token = t1))
+  last <- handle_request(h, list(op = "submit", token = t1, chunk = cl$chunk,
+                                 results = list(1)))
+  expect_true(last$done)
+})

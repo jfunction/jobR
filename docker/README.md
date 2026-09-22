@@ -19,12 +19,16 @@ worker-floor    R 3.6.3   1 core
 ## Running it
 
 ```bash
-docker compose -f docker/docker-compose.yml up --build --exit-code-from host
+docker/run.sh docker/docker-compose.yml
 ```
 
 The host container's exit code **is** the test result, so that one command is
 the whole harness. First run builds three images and takes a while; afterwards
 the dependency layer is cached.
+
+`run.sh` rather than `up --exit-code-from host`, for a reason worth knowing
+before you reach for the shorter command: see
+[`--exit-code-from host` had to go](#--exit-code-from-host-had-to-go) below.
 
 Tear down with `docker compose -f docker/docker-compose.yml down -v`.
 
@@ -54,17 +58,23 @@ To change the version matrix, edit the `R_VERSION` build arg per service. Any
 ## What a single-machine run does and does not prove
 
 All four containers share one host's CPUs, so every worker runs at the same
-speed and the split comes out even by construction:
+speed. How the work divides is therefore an artefact of timing, not of
+capability:
 
 ```
           host jobs cpu_seconds share
-1 728e4b679d2f   20         8.2 0.333
-2 ba4ae2e4a5b1   20         8.0 0.333
-3 fc2511c593bf   20         8.0 0.333
+1 4ad21b75858e   25        10.0 0.417
+2 e9f902b64f47   20         8.0 0.333
+3 fdd2ce06cb6e   15         6.2 0.250
 ```
 
-That demonstrates correctness -- every job done exactly once, across three
-machines and three R versions -- but **not** load-proportional distribution.
+Earlier runs split it evenly three ways, which looked more impressive and
+meant no more: the host used to stop the instant the last chunk landed, so
+every worker was cut off at the same moment. It now waits to say goodbye, the
+workers stop at slightly different times, and the shares move. Both shapes
+demonstrate correctness -- every job done exactly once, across three machines
+and three R versions -- and neither demonstrates load-proportional
+distribution.
 A faster machine taking more chunks is real behaviour, and it needs genuinely
 unequal machines to show. The two-laptop run in `HOME-TEST.md` is what
 demonstrates that.
@@ -137,6 +147,19 @@ one that has dropped out because its link died, which is the exact event this
 scenario exists to observe. It aborted a run at 26 of 40 chunks and reported
 success, because the host never reached its assertions.
 
+This bites **every** scenario, not just the impaired ones, and it started
+biting the plain version matrix the moment the host began outliving its
+workers. That run ended:
+
+```
+jobr-testbed-host-1   |   all chunks done; staying up so workers can finish cleanly
+jobr-testbed-worker-current-1 exited with code 0
+Aborting on container exit...
+```
+
+No `== OK ==`, no assertions, exit code 0. A green run that checked nothing is
+worse than a red one.
+
 `docker/run.sh` starts the stack detached, streams the logs, and blocks on
 `docker compose wait host`, so workers coming and going no longer decide the
 result. The host is the only judge.
@@ -157,12 +180,17 @@ does `down -v` first and recreates every container.
 ### Verified exit paths
 
 Both directions of the harness were checked, because a test harness that can
-only report success is not a harness:
+only report success is not a harness. The blackout scenario returned 1 against
+the code as it was, and 0 against the fix:
 
 ```
-docker/run.sh docker/docker-compose.netem.yml                                   -> 0
-docker/run.sh docker/docker-compose.netem.yml docker/docker-compose.partition.yml -> 1
+                                              before the fix   after
+docker/run.sh .../netem.yml                              0        0
+docker/run.sh .../netem.yml .../partition.yml            1        0
 ```
+
+That one column is the whole argument for building the impairment before
+building the fix.
 
 ### What the impaired run showed
 
@@ -175,9 +203,8 @@ application from a bad link is *delay* and *connection loss*, so those are the
 knobs that test anything. This is worth knowing before tuning `NETEM_LOSS`
 upward and believing it proves something.
 
-**A 25-second blackout removes a worker permanently.** See
-`docker-compose.partition.yml`, which asserts the opposite and therefore
-**fails as of this commit**. Measured:
+**A 25-second blackout used to remove a worker permanently.** This is what
+the impairment was built to find, and it found it on the first run:
 
 ```
 07:37:44.5  link goes dark
@@ -189,18 +216,30 @@ upward and believing it proves something.
   - 11 of 40 chunks are not done
 ```
 
-Reproduced on a second run, to the second.
+One timed-out request ended the worker's participation for good, and because
+that request was a `submit`, a finished chunk went with it. The fleet stayed
+correct -- lease lapses, chunk reissued, every job exactly once -- but the
+machine was gone. Reproduced twice, to the second.
 
-One timed-out request ends the worker's participation for good, and because
-that request was a submit, a finished chunk was discarded with it. Nothing
-retries and nothing restarts. The fleet is still correct -- the lease lapses,
-the chunk is reissued, every job lands exactly once -- but the machine is
-gone. On the links this package is built for, that is the difference between
-donating a laptop for an afternoon and babysitting an R session.
+`docker-compose.partition.yml` asserted the opposite, so it failed. It now
+passes:
 
-The fix is a bounded retry in `call()` in `R/join.R`, which currently treats
-one timeout as proof the host is gone. That is a protocol change, not a
-testbed change, so it is recorded here rather than made here.
+```
+== netem: partition starts ==
+  lost contact with the host (no reply: 5 | Timed out); retrying for up to 60s
+worker done: 20 chunks                 <- the steady worker hits its cap
+== netem: partition ends ==
+  back in touch with the host          <- and picks up chunk 32
+== OK == all 200 jobs, all 40 chunks done
+```
+
+The impaired worker did 20 of the 40 chunks, 11 of them after coming back. The
+steady worker is capped at 20, and had already stopped, so nothing else could
+have done them. What changed is described in `DESIGN.md`; in short, the worker
+retries a silent host instead of concluding it has gone, and the host stops
+being silent for the one reason that used to be indistinguishable from a dead
+link -- it now stays up after the last chunk and tells every worker the jobset
+is over.
 
 ## Worth adding next
 

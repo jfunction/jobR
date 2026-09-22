@@ -481,3 +481,83 @@ test_that("a worker installs a missing package from the host, not CRAN", {
   expect_true(pkg %in% rownames(utils::installed.packages(lib.loc = wlib)))
   expect_equal(collected(work, "test"), serial_expectation(6), ignore_attr = TRUE)
 })
+
+# ---- a link that is not there yet, or not there any more ---------------------
+# A worker used to treat the first unanswered request as proof the host had
+# gone, and stop for good. On the intermittent links this package is built for
+# that is the difference between donating a laptop and babysitting a session.
+#
+# The mid-run case -- a link that dies while the worker is holding a chunk --
+# needs real network impairment and lives in docker/docker-compose.partition.yml,
+# because nothing a single process can do to itself is a faithful partition.
+# What can be tested here is the same retry path from the other end: a host
+# that is not listening yet.
+
+test_that("a worker waits for a host that is not up yet", {
+  skip_unless_integration()
+  work <- tempfile("host-"); proj <- write_demo_project(tempfile("proj-"))
+  url <- test_url(); phrase <- "india-juliet-kilo-lima"
+
+  # Deliberately backwards: the worker starts first, against an address where
+  # nothing is listening. Every request it makes goes unanswered.
+  w <- start_worker(url, phrase, max_seconds = 120)
+  on.exit(kill_quietly(w), add = TRUE)
+
+  # Long enough that the old code -- which gave up on the first silence -- is
+  # certainly dead by now, and the new code is certainly inside its retry loop.
+  Sys.sleep(8)
+  expect_true(w$is_alive())
+
+  h <- start_host(work, proj, n_jobs = 20, chunksize = 5, url = url,
+                  phrase = phrase, max_seconds = 120)
+  on.exit(kill_quietly(h), add = TRUE)
+  await_host(h)
+
+  wait_until(function() !w$is_alive(), timeout = 120, what = "worker to finish")
+  expect_equal(collected(work, "test"), serial_expectation(20), ignore_attr = TRUE)
+  expect_ledger_sane(work, "test", n_chunks = 4)
+})
+
+test_that("a worker told not to retry still fails fast", {
+  skip_unless_integration()
+  url <- test_url()
+
+  # The retry budget must be a choice, not a new floor. Someone scripting
+  # against a host they know is up wants the old behaviour, and a test suite
+  # that cannot turn it off would take a minute per unreachable host.
+  w <- bg(function(url) {
+    tryCatch({
+      jobr_join(url, "mike-november-oscar-papa", cache_dir = tempfile("cache-"),
+                reconnect_seconds = 0, quiet = TRUE)
+      "joined"
+    }, error = function(e) "gave-up")
+  }, list(url = url))
+  on.exit(kill_quietly(w), add = TRUE)
+
+  wait_until(function() !w$is_alive(), timeout = 45, what = "worker to give up")
+  expect_equal(w$get_result(), "gave-up")
+})
+
+# ---- the host waiting for its workers ---------------------------------------
+
+test_that("the host does not vanish the moment the last chunk lands", {
+  skip_unless_integration()
+  work <- tempfile("host-"); proj <- write_demo_project(tempfile("proj-"))
+  url <- test_url(); phrase <- "romeo-sierra-tango-uniform"
+
+  h <- start_host(work, proj, n_jobs = 20, chunksize = 5, url = url,
+                  phrase = phrase, max_seconds = 120)
+  on.exit(kill_quietly(h), add = TRUE)
+  await_host(h)
+
+  w <- start_worker(url, phrase, max_seconds = 120)
+  on.exit(kill_quietly(w), add = TRUE)
+  wait_until(function() !w$is_alive(), timeout = 60, what = "worker to finish")
+
+  # The worker reached the end without ever being left to guess: it was told
+  # the jobset was done, said goodbye, and the host then stopped of its own
+  # accord rather than being waited out. If the host were still sitting in its
+  # linger, this would time out.
+  wait_until(function() !h$is_alive(), timeout = 30, what = "host to shut down")
+  expect_equal(h$get_result(), "host-finished")
+})

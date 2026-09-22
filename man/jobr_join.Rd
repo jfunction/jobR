@@ -16,6 +16,7 @@ jobr_join(
   max_seconds = Inf,
   max_failures = 5L,
   renew_seconds = NULL,
+  reconnect_seconds = 60,
   use_host_packages = TRUE,
   quiet = FALSE
 )
@@ -50,6 +51,12 @@ indefinitely.}
 \item{renew_seconds}{How often to renew the lease on the chunk being
 worked on. Defaults to a third of the lease the host advertises, so two
 renewals can be lost before the chunk is given to someone else.}
+
+\item{reconnect_seconds}{How long to keep retrying a request that got no
+reply before concluding the host is really gone. A link that drops for a
+moment is the normal condition on the networks this package is for, and
+treating the first missed reply as the end of the run loses the machine
+and whatever chunk it was holding. Set to 0 to give up immediately.}
 
 \item{use_host_packages}{When the host serves a package repository, fetch
 missing packages from it rather than from CRAN. FALSE always uses CRAN.}

@@ -2,14 +2,10 @@
 #
 #   docker/run.sh docker/docker-compose.netem.yml docker/docker-compose.partition.yml
 #
-# Read this before running it: AS OF THIS COMMIT, THIS SCENARIO FAILS, and the
-# failure is the point. It is written to state a requirement the package does
-# not yet meet, so that meeting it is verifiable rather than asserted.
-#
-# What it does. The impaired worker's link drops to 100% loss 30 seconds in
-# and stays dark for 25 -- longer than the 15-second lease, so whatever chunk
-# it was holding lapses and is reissued to someone else while it is gone. Then
-# the link comes back.
+# The impaired worker's link drops to 100% loss 30 seconds in and stays dark
+# for 25 -- longer than the 15-second lease, so whatever chunk it was holding
+# lapses and is reissued to someone else while it is gone. Then the link comes
+# back, and the worker has to still be there.
 #
 # Why the steady worker is capped. Without a cap this scenario passes while
 # demonstrating nothing: the healthy worker quietly finishes the jobset alone,
@@ -19,23 +15,26 @@
 # that worker came back. The existing assertions then carry the weight; no new
 # assertion machinery is needed.
 #
-# What actually happens today, measured, and reproduced on a second run:
+# This file was written to fail. It did, for one commit, and that failure is
+# what the fix was built against:
 #
-#   07:37:44.5  link goes dark
-#   07:37:53.9  "host vanished before chunk 22 was accepted" -- worker exits
-#   07:38:09.5  link comes back, 15.6 seconds too late for anyone to notice
+#   partition starts
+#   host vanished before chunk 22 was accepted   <- worker exits, 9 chunks in
+#   partition ends, 15.6 seconds too late for anyone to notice
+#   == FAILED == 145 of 200 jobs, 11 of 40 chunks not done
 #
-# and the run ends:
+# What happens now:
 #
-#   == FAILED ==
-#     - jobs not covered exactly once: 145 rows, 145 distinct ids, expected 200
-#     - 11 of 40 chunks are not done
+#   partition starts
+#   lost contact with the host (no reply: 5 | Timed out); retrying for up to 60s
+#   worker done: 20 chunks                       <- the steady worker hits its cap
+#   partition ends
+#   back in touch with the host                  <- and picks up chunk 32
+#   == OK == all 200 jobs, all 40 chunks done
 #
-# One timed-out request ends the worker's participation permanently. The
-# request was a submit, so a finished chunk was thrown away too. Nothing
-# retries, and nothing restarts it. On the intermittent links this package
-# exists for, that is the difference between a friend donating a laptop for an
-# afternoon and a friend babysitting an R session.
+# The impaired worker did 20 of the 40 chunks, 11 of them after coming back
+# from a blackout that used to be fatal. The other worker had already stopped,
+# so nothing else could have done them.
 
 services:
   host:

@@ -33,12 +33,12 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      # run.sh, not `up --exit-code-from host`: that flag aborts the run when any
+      # container exits, and the host is deliberately the last to go. It also
+      # streams every container's logs here, so there is no separate
+      # show-logs-on-failure step.
       - name: Run the mixed-version testbed
-        run: |
-          docker compose -f docker/docker-compose.yml up --build --abort-on-container-exit --exit-code-from host
-      - name: Show logs on failure
-        if: failure()
-        run: docker compose -f docker/docker-compose.yml logs --no-color
+        run: docker/run.sh docker/docker-compose.yml
       - name: Tear down
         if: always()
         run: docker compose -f docker/docker-compose.yml down -v
@@ -49,10 +49,10 @@ jobs:
   # cannot survive its link fails the job rather than being quietly carried by
   # the healthy one.
   #
-  # docker-compose.partition.yml is deliberately NOT run here. It asserts that
-  # a worker rejoins after its link goes dark, which the package does not yet
-  # do -- see docker/README.md. Wiring it in now would just paint CI red
-  # without telling anyone anything they cannot already read there.
+  # The blackout overlay runs too. It asserts that a worker whose link dies for
+  # 25 seconds comes back and finishes the work, with the healthy worker capped
+  # so that nothing else can. That assertion failed when it was written, which
+  # is why it was written; it is in CI so it cannot quietly start failing again.
   impaired:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -69,6 +69,8 @@ jobs:
       # there is no separate "show logs on failure" step to add here.
       - name: Run the impaired-network scenario
         run: docker/run.sh docker/docker-compose.netem.yml
+      - name: Run the blackout scenario
+        run: docker/run.sh docker/docker-compose.netem.yml docker/docker-compose.partition.yml
       - name: Tear down
         if: always()
         run: docker compose -f docker/docker-compose.netem.yml down -v

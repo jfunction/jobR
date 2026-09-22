@@ -184,6 +184,46 @@ R is offered sources -- a limit of CRAN, not of this code.
 It is deliberately explicit rather than automatic: it reaches out to CRAN and
 can take a while, which should not happen as a side effect of starting a host.
 
+### Surviving a link that drops — landed, and tested by breaking one
+
+A worker used to treat the first unanswered request as proof the host had gone
+and stop for good. On the links this package is for, that is the wrong default
+by a long way, and the containerised blackout measured the cost precisely: a
+25-second outage removed a worker 15.6 seconds before its link came back, and
+took the finished chunk it was holding with it.
+
+The reason it was wrong is worth stating, because it was not laziness. Silence
+genuinely was ambiguous. The host shut down the instant the last chunk landed,
+so the last worker to ask for work got no reply -- and no reply is also what a
+dead network looks like. No amount of retrying resolves an ambiguity like
+that; it only chooses which way to be wrong.
+
+So both ends changed:
+
+- The **host lingers**. After the last chunk it keeps answering until every
+  worker that enrolled has been told, in a reply it actually received, that
+  the jobset is over. Workers say `bye` when they stop for their own reasons,
+  so it normally exits at once; `linger_seconds` caps the wait for a machine
+  that is never coming back. Silence now means the link.
+- The **worker retries**. `call()` re-dials and tries again with backoff for
+  `reconnect_seconds` (60 by default) before concluding the host is gone. The
+  re-dial matters: a timed-out exchange leaves a request outstanding in the
+  req socket's state machine, and a partition does not close a TCP connection,
+  it just stops delivering.
+
+Two calls deliberately do not retry: the lease heartbeat and handing a chunk
+back after a failure. Both run inside the work, and a heartbeat that waits out
+a dead link stalls the very thing the lease protects. If they do not get
+through, the lease lapses -- which is what a lease is for.
+
+The submit is the opposite case, and gets the whole budget: the work is
+already done, and giving up throws it away. A duplicate submit is harmless,
+because completion is terminal in the ledger.
+
+`docker/docker-compose.partition.yml` is the proof, and it is a real one: the
+healthy worker is capped at 20 of 40 chunks, so the other 20 can only be done
+by the worker that went dark. It failed before this change and passes after.
+
 ---
 
 ## What is partially built
@@ -280,34 +320,25 @@ Different claims rest on different evidence, and they are not interchangeable.
 |---|---|
 | Ledger accounting, leases, chunk boundaries | Unit and property tests over randomly generated event histories |
 | The whole request handler | Unit tests, no sockets involved |
-| Multi-process, real sockets, deterministic faults | Integration tests on one machine |
+| Multi-process, real sockets, deterministic faults | Integration tests on one machine, from a checkout or an installed package |
 | Multi-machine, multi-R-version, real network | `docker/` testbed: 3 R versions, 4 containers, 60 jobs, exactly once |
 | R 3.6 floor | nanonext 1.10.2 compiled from source under R 3.6.3 in a container, with a real socket round-trip |
 | Two physical machines over a LAN | One manual run, Windows to Windows |
 | Load-proportional distribution | **Not demonstrated.** Containers on one host all run at the same speed |
 | A bad link: 150ms +/- 50ms delay, 5% loss | `docker/docker-compose.netem.yml`: one worker behind `tc netem` took 18 of 40 chunks, 200 jobs exactly once |
-| A link that goes dark mid-run | **Fails.** `docker-compose.partition.yml` asserts a worker rejoins after 25s of blackout; it does not -- one timed-out request ends it |
+| A link that goes dark mid-run | `docker-compose.partition.yml`: a worker survives a 25s total blackout and does 11 more chunks afterwards, with the other worker capped so nothing else could have |
 | Windows R 3.6 | **Not demonstrated.** CRAN ships no binary; needs Rtools 3.5 |
 
 ## Open, in rough priority order
 
-1. **A worker that survives a blip.** One timed-out request makes `call()` in
-   `R/join.R` conclude the host is gone, and the worker stops for good --
-   measured: a 25-second blackout removed a worker 15 seconds before its link
-   came back, discarding a finished chunk with it. The fleet stays correct,
-   because the lease lapses and the chunk is reissued, but the machine is
-   lost. Needs a bounded retry before giving up, and a way to tell "the host
-   shut down because the jobset finished" from "the link is down", which the
-   current code cannot distinguish. Demonstrated by
-   `docker/docker-compose.partition.yml`, which fails today on purpose.
-2. **A heartbeat that survives a long single job.** The current one renews
+1. **A heartbeat that survives a long single job.** The current one renews
    between jobs, so a job longer than the lease is still beyond reach. Needs
    something that can renew while a call is in flight -- async, promises, or a
    background process. Blocking for workloads with minutes-long jobs, such as
    a model run inside a sensitivity analysis.
-3. **Progress and projected finish.** The ledger already has the timestamps.
-4. **Prefetched per-client queues**, if round trips ever start to matter.
-5. **Abort a chunk whose lease was lost.** A worker told it no longer holds the
+2. **Progress and projected finish.** The ledger already has the timestamps.
+3. **Prefetched per-client queues**, if round trips ever start to matter.
+4. **Abort a chunk whose lease was lost.** A worker told it no longer holds the
    lease currently finishes the chunk anyway; the submit is a harmless
    duplicate, but the work is wasted. Stopping early is easy serially and
    awkward across cores, where the tasks are already in flight.

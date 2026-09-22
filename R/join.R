@@ -34,6 +34,11 @@ NULL
 #' @param renew_seconds How often to renew the lease on the chunk being
 #'   worked on. Defaults to a third of the lease the host advertises, so two
 #'   renewals can be lost before the chunk is given to someone else.
+#' @param reconnect_seconds How long to keep retrying a request that got no
+#'   reply before concluding the host is really gone. A link that drops for a
+#'   moment is the normal condition on the networks this package is for, and
+#'   treating the first missed reply as the end of the run loses the machine
+#'   and whatever chunk it was holding. Set to 0 to give up immediately.
 #' @param use_host_packages When the host serves a package repository, fetch
 #'   missing packages from it rather than from CRAN. FALSE always uses CRAN.
 #' @param max_seconds Give up after this long.
@@ -46,35 +51,83 @@ jobr_join <- function(url, passphrase,
                       tls = NULL, cores = 1L, timeout_ms = 5000,
                       poll_seconds = 2, max_chunks = Inf, max_seconds = Inf,
                       max_failures = 5L, renew_seconds = NULL,
+                      reconnect_seconds = 60,
                       use_host_packages = TRUE, quiet = FALSE) {
   sock <- nanonext::socket("req", dial = url, tls = tls)
   on.exit(close(sock), add = TRUE)
   started <- unix_time()
+  why <- NULL
 
-  # `fatal` distinguishes the two situations a silent host can mean. During
-  # join, no reply is a real failure worth reporting. Once working, it usually
-  # means the jobset finished and the host shut down, which is this worker's
-  # cue to stop -- not an error. Any chunk still leased simply lapses and is
-  # picked up by whoever runs next.
-  call <- function(req, fatal = TRUE) {
+  # One exchange. Returns NULL if nothing came back, and records why.
+  attempt <- function(req, block) {
     # The send result must be checked. A req socket that failed to send is not
     # entitled to receive, so recv'ing anyway reports "incorrect state" and
     # hides whatever actually went wrong.
-    sent <- nanonext::send(sock, req, mode = "serial", block = timeout_ms)
+    sent <- nanonext::send(sock, req, mode = "serial", block = block)
     if (!identical(as.integer(sent), 0L)) {
-      if (fatal) {
-        stop("could not send to host: ", nanonext::nng_error(sent), call. = FALSE)
-      }
+      why <<- paste0("could not send: ", nanonext::nng_error(sent))
       return(NULL)
     }
-    reply <- nanonext::recv(sock, mode = "serial", block = timeout_ms)
+    reply <- nanonext::recv(sock, mode = "serial", block = block)
     if (inherits(reply, "errorValue")) {
-      if (fatal) {
-        stop("no reply from host (errorValue ", as.integer(reply), ")", call. = FALSE)
-      }
+      why <<- paste0("no reply: ", nanonext::nng_error(reply))
       return(NULL)
     }
     reply
+  }
+
+  # A timed-out exchange leaves a request outstanding in the req socket's
+  # state machine, and the TCP connection under it may be half dead -- a
+  # partition does not close a socket, it just stops delivering. Starting a
+  # fresh one is cheap and leaves nothing to reason about.
+  redial <- function() {
+    tryCatch(close(sock), error = function(e) NULL)
+    sock <<- nanonext::socket("req", dial = url, tls = tls)
+  }
+
+  # Silence used to mean "the host has gone, stop". That was wrong in a way
+  # that cost real work: a laptop on an intermittent link would drop out on
+  # the first missed reply and never come back. Measured in the testbed, a
+  # 25-second blackout removed a worker 15 seconds before its link recovered,
+  # discarding the finished chunk it was holding on the way out.
+  #
+  # Now the host stays up after the last chunk and tells every worker the
+  # jobset is done (see linger_seconds in jobr_serve), so silence really does
+  # mean the link. Keep trying, with backoff, for a bounded budget.
+  #
+  # `retry = FALSE` is for calls that must not block the work they protect:
+  # the lease heartbeat, and handing a chunk back after a failure. Both are
+  # advisory -- if they do not get through, the lease simply lapses, which is
+  # exactly what it is for.
+  call <- function(req, fatal = TRUE, retry = TRUE, block = timeout_ms) {
+    reply <- attempt(req, block)
+    if (!is.null(reply)) return(reply)
+    redial()
+
+    budget <- if (retry) reconnect_seconds else 0
+    # Never keep trying past the worker's own deadline.
+    give_up <- min(unix_time() + budget, started + max_seconds)
+
+    if (budget > 0 && unix_time() < give_up) {
+      if (!quiet) message("  lost contact with the host (", why,
+                          "); retrying for up to ", round(budget), "s")
+      pause <- 1
+      repeat {
+        left <- give_up - unix_time()
+        if (left <= 0) break
+        Sys.sleep(min(pause, left))
+        reply <- attempt(req, block)
+        if (!is.null(reply)) {
+          if (!quiet) message("  back in touch with the host")
+          return(reply)
+        }
+        redial()
+        pause <- min(pause * 2, 8)
+      }
+    }
+
+    if (fatal) stop("no reply from the host at ", url, ": ", why, call. = FALSE)
+    NULL
   }
 
   hi <- call(list(op = "hello", passphrase = passphrase,
@@ -142,12 +195,17 @@ jobr_join <- function(url, passphrase,
 
   done <- 0L
   consecutive_failures <- 0L
+  # Whether the host has already told us, in a reply we received, that the
+  # jobset is finished. If it has, it has also stopped waiting for us, and
+  # there is nothing left to say.
+  told_done <- FALSE
   repeat {
     if (unix_time() - started > max_seconds) break
     if (done >= max_chunks) break
     cl <- call(list(op = "claim", token = hi$token), fatal = FALSE)
     if (is.null(cl)) {
-      if (!quiet) message("host is no longer answering, stopping")
+      if (!quiet) message("the host is still unreachable after ",
+                          round(reconnect_seconds), "s, stopping")
       break
     }
     if (!isTRUE(cl$ok)) break
@@ -156,7 +214,7 @@ jobr_join <- function(url, passphrase,
       # chunks may be leased to workers that will not come back, and those
       # leases lapse shortly. Exiting here would abandon exactly the work this
       # package exists to recover, so wait and ask again.
-      if (isTRUE(cl$done)) break
+      if (isTRUE(cl$done)) { told_done <- TRUE; break }
       if (!quiet) message("  all chunks held by other workers, waiting...")
       Sys.sleep(poll_seconds)
       next
@@ -170,8 +228,13 @@ jobr_join <- function(url, passphrase,
     lease <- if (is.null(cl$lease_seconds)) 300 else cl$lease_seconds
     every <- if (is.null(renew_seconds)) max(5, lease / 3) else renew_seconds
     beat <- function() {
+      # No retry, and a short block. This runs between jobs inside the chunk,
+      # so a heartbeat that waits out a dead link stalls the very work the
+      # lease is protecting. If it does not get through, the lease lapses --
+      # which is what a lease is for.
       r <- call(list(op = "renew", token = hi$token, chunk = cl$chunk),
-                fatal = FALSE)
+                fatal = FALSE, retry = FALSE,
+                block = min(timeout_ms, 2000))
       # A refusal means the lease lapsed and the chunk now belongs to someone
       # else. Finishing it is wasted but harmless -- the submit will be a
       # duplicate, and completion is terminal -- so say so and carry on.
@@ -187,7 +250,10 @@ jobr_join <- function(url, passphrase,
     if (inherits(out, "error")) {
       # Hand the chunk back rather than submitting a result that is really an
       # error. Someone else, or this worker on a later pass, can retry it.
-      call(list(op = "fail", token = hi$token, chunk = cl$chunk), fatal = FALSE)
+      # Advisory: if it does not arrive, the lease lapses and the chunk is
+      # reissued anyway. Not worth spending the reconnect budget on.
+      call(list(op = "fail", token = hi$token, chunk = cl$chunk),
+           fatal = FALSE, retry = FALSE)
       consecutive_failures <- consecutive_failures + 1L
       if (!quiet) message("  chunk ", cl$chunk, " failed: ", conditionMessage(out))
 
@@ -204,12 +270,34 @@ jobr_join <- function(url, passphrase,
       next
     }
     consecutive_failures <- 0L
-    if (is.null(call(list(op = "submit", token = hi$token, chunk = cl$chunk,
-                          results = out), fatal = FALSE))) {
-      if (!quiet) message("host vanished before chunk ", cl$chunk, " was accepted")
+    # The one call worth spending the whole reconnect budget on: the work is
+    # already done, and giving up here throws it away. A duplicate submit is
+    # harmless -- completion is terminal in the ledger -- so resubmitting a
+    # chunk that lapsed and was reissued costs nothing but the bytes.
+    sub <- call(list(op = "submit", token = hi$token, chunk = cl$chunk,
+                     results = out), fatal = FALSE)
+    if (is.null(sub)) {
+      if (!quiet) message("could not deliver chunk ", cl$chunk,
+                          " before giving up on the host; it will be reissued")
       break
     }
     done <- done + 1L
+
+    # The submit reply already says whether that was the last chunk, and the
+    # host stops once every worker has been told. Looping round to ask for
+    # more would therefore be answered by silence -- from a host that shut
+    # down for the best of reasons -- and the worker would spend its whole
+    # reconnect budget discovering that the run had ended well.
+    if (isTRUE(sub$done)) { told_done <- TRUE; break }
+  }
+
+  # Tell the host not to wait for this worker at the end of the jobset --
+  # unless it has already said the jobset is over, in which case it has
+  # stopped waiting for anyone and is very likely gone. Best effort and
+  # deliberately cheap: if it does not arrive, the host's linger caps the wait.
+  if (!told_done) {
+    call(list(op = "bye", token = hi$token), fatal = FALSE, retry = FALSE,
+         block = min(timeout_ms, 2000))
   }
 
   if (!quiet) message("worker finished, ", done, " chunks processed")

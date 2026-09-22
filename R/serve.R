@@ -48,6 +48,10 @@ host_new <- function(project_dir, jobs, chunksize = 25,
   state$passphrase    <- passphrase
   state$tokens        <- character()
   state$workers       <- character()
+  # Workers that have been told, in a reply they actually received, that the
+  # jobset is finished. Without this the host cannot tell "everyone knows we
+  # are done" from "nobody is listening", and it used to assume the second.
+  state$farewelled    <- character()
   state$lease_seconds <- lease_seconds
   state$work_dir      <- work_dir
   state$results_dir   <- results_dir
@@ -127,8 +131,9 @@ handle_request <- function(state, req, now = unix_time()) {
                          lease_seconds = state$lease_seconds, now = now)
       state$ledger <- res$ledger
       if (is.null(res$chunk)) {
-        list(ok = TRUE, chunk = NULL,
-             done = jobset_complete(state$ledger, state$jobset, state$n_chunks, now))
+        done <- jobset_complete(state$ledger, state$jobset, state$n_chunks, now)
+        if (isTRUE(done)) state$farewelled <- union(state$farewelled, worker)
+        list(ok = TRUE, chunk = NULL, done = done)
       } else {
         rows <- state$plan[res$chunk, ]
         list(ok = TRUE, chunk = res$chunk,
@@ -149,8 +154,9 @@ handle_request <- function(state, req, now = unix_time()) {
                 file.path(state$results_dir, sprintf("%06d.rds", req$chunk)))
         state$ledger <- ledger_append(state$ledger, "complete", state$jobset,
                                       req$chunk, worker, now = now)
-        list(ok = TRUE,
-             done = jobset_complete(state$ledger, state$jobset, state$n_chunks, now))
+        done <- jobset_complete(state$ledger, state$jobset, state$n_chunks, now)
+        if (isTRUE(done)) state$farewelled <- union(state$farewelled, worker)
+        list(ok = TRUE, done = done)
       }
     },
 
@@ -177,6 +183,16 @@ handle_request <- function(state, req, now = unix_time()) {
     fail = {
       state$ledger <- ledger_append(state$ledger, "fail", state$jobset,
                                     req$chunk, worker, now = now)
+      list(ok = TRUE)
+    },
+
+    # "I am leaving, do not wait for me." A worker stops for reasons the host
+    # cannot see -- it hit max_chunks, or its own deadline -- and without
+    # being told, the host would hold the door open for it at the end of the
+    # jobset for no reason. Best-effort: a worker that dies without saying
+    # this is exactly the case linger_seconds caps.
+    bye = {
+      state$farewelled <- union(state$farewelled, worker)
       list(ok = TRUE)
     },
 
@@ -217,6 +233,12 @@ handle_request <- function(state, req, now = unix_time()) {
 #' @param tls Optional `tlsConfig` from [host_credentials()].
 #' @param timeout_ms How long to block waiting for each request.
 #' @param max_seconds Stop after this long regardless of progress.
+#' @param linger_seconds How long to keep answering after the last chunk is
+#'   done, so that workers can learn the jobset finished instead of inferring
+#'   it from silence. The host stops as soon as every enrolled worker has been
+#'   told, so a normal run does not wait this out; it is a cap for workers
+#'   that are not coming back. Setting it to 0 restores the old behaviour of
+#'   shutting down the instant the work is complete.
 #' @param ready_file Optional path written once the socket is actually bound,
 #'   and removed on exit. Supervisors and tests need an observable readiness
 #'   signal: dialling cannot provide one, because nanonext connects
@@ -227,7 +249,8 @@ handle_request <- function(state, req, now = unix_time()) {
 #' @return The host state, invisibly.
 #' @export
 jobr_serve <- function(state, url, tls = NULL, timeout_ms = 1000,
-                       max_seconds = Inf, ready_file = NULL, quiet = FALSE) {
+                       max_seconds = Inf, linger_seconds = 30,
+                       ready_file = NULL, quiet = FALSE) {
   sock <- nanonext::socket("rep", listen = url, tls = tls)
   on.exit(close(sock), add = TRUE)
   started <- unix_time()
@@ -249,19 +272,55 @@ jobr_serve <- function(state, url, tls = NULL, timeout_ms = 1000,
     message("  passphrase: ", state$passphrase)
   }
 
+  # Set once the work is finished, which starts the linger.
+  finished_at <- NULL
+
+  # Workers are identified in the ledger, and in state$farewelled, by the
+  # first eight characters of their token rather than the whole thing. Compare
+  # like with like: setdiff() over the full tokens would never match, and the
+  # host would sit out the entire linger on every single run.
+  awaiting <- function() setdiff(substr(state$tokens, 1L, 8L), state$farewelled)
+
   repeat {
     if (unix_time() - started > max_seconds) break
-    req <- nanonext::recv(sock, mode = "serial", block = timeout_ms)
-    if (inherits(req, "errorValue")) next          # timeout: loop and re-check
-    reply <- tryCatch(handle_request(state, req),
-                      error = function(e) list(ok = FALSE, error = conditionMessage(e)))
-    nanonext::send(sock, reply, mode = "serial", block = timeout_ms)
 
-    if (!quiet && identical(req$op, "submit")) {
-      p <- ledger_progress(state$ledger, state$jobset, state$n_chunks)
-      message(sprintf("  %d/%d chunks done", p[["done"]], state$n_chunks))
+    req <- nanonext::recv(sock, mode = "serial", block = timeout_ms)
+    if (!inherits(req, "errorValue")) {            # errorValue means: nothing came
+      reply <- tryCatch(handle_request(state, req),
+                        error = function(e) list(ok = FALSE, error = conditionMessage(e)))
+      nanonext::send(sock, reply, mode = "serial", block = timeout_ms)
+
+      if (!quiet && identical(req$op, "submit")) {
+        p <- ledger_progress(state$ledger, state$jobset, state$n_chunks)
+        message(sprintf("  %d/%d chunks done", p[["done"]], state$n_chunks))
+      }
     }
-    if (jobset_complete(state$ledger, state$jobset, state$n_chunks)) break
+
+    if (jobset_complete(state$ledger, state$jobset, state$n_chunks)) {
+      # Stopping here is what the host used to do, and it made every normal
+      # shutdown indistinguishable from a broken link: the last worker to ask
+      # for work got silence, and silence is also what a dead network looks
+      # like. A worker cannot retry its way out of an ambiguity like that, so
+      # it either gave up too early on a blip or hung on after a finished run.
+      #
+      # Stay up instead, until every worker that enrolled has been told in a
+      # reply it actually received. Then silence means the link, and the
+      # worker is entitled to keep trying.
+      if (is.null(finished_at)) {
+        finished_at <- unix_time()
+        if (!quiet && length(awaiting())) {
+          message("  all chunks done; staying up so workers can finish cleanly")
+        }
+      }
+      if (!length(awaiting())) break
+      if (unix_time() - finished_at > linger_seconds) {
+        if (!quiet) {
+          message("  ", length(awaiting()),
+                  " worker(s) never came back to be told; shutting down anyway")
+        }
+        break
+      }
+    }
   }
   invisible(state)
 }

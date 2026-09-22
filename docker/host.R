@@ -40,7 +40,8 @@ h <- host_new(project, jobs = jobs, chunksize = chunksize,
               lease_seconds = lease, jobset = "testbed")
 
 jobr_serve(h, sprintf("tcp://0.0.0.0:%d", port),
-           max_seconds = deadline, ready_file = "/tmp/jobr-ready", quiet = FALSE)
+           max_seconds = deadline, linger_seconds = env_num("JOBR_LINGER", 30),
+           ready_file = "/tmp/jobr-ready", quiet = FALSE)
 
 # ---- assertions -------------------------------------------------------------
 # The definition of a correct run lives in assertions.R, free of container and

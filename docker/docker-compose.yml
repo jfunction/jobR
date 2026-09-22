@@ -1,10 +1,17 @@
 # A mixed-version, multi-node jobR testbed.
 #
-#   docker compose -f docker/docker-compose.yml up --build --exit-code-from host
+#   docker/run.sh docker/docker-compose.yml
 #
 # The host container's exit code is the test result. Workers deliberately run
 # different R versions: a fleet of machines people already own is a fleet of
 # mismatched R, and that is where the subtlest bugs live (see ?versions).
+#
+# Use run.sh rather than `up --exit-code-from host`. That flag implies
+# --abort-on-container-exit, which stops the run when ANY container exits, and
+# a worker now finishes before the host does: the host stays up briefly at the
+# end so workers can be told the jobset is over. Compose would kill the host
+# mid-goodbye, before it reached a single assertion, and report success. It
+# did exactly that once, and the run looked clean.
 
 name: jobr-testbed
 
