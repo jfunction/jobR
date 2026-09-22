@@ -285,19 +285,29 @@ Different claims rest on different evidence, and they are not interchangeable.
 | R 3.6 floor | nanonext 1.10.2 compiled from source under R 3.6.3 in a container, with a real socket round-trip |
 | Two physical machines over a LAN | One manual run, Windows to Windows |
 | Load-proportional distribution | **Not demonstrated.** Containers on one host all run at the same speed |
-| Intermittency: dropped links, latency, partitions | **Not demonstrated.** Needs `tc netem`; currently tested by hoping |
+| A bad link: 150ms +/- 50ms delay, 5% loss | `docker/docker-compose.netem.yml`: one worker behind `tc netem` took 18 of 40 chunks, 200 jobs exactly once |
+| A link that goes dark mid-run | **Fails.** `docker-compose.partition.yml` asserts a worker rejoins after 25s of blackout; it does not -- one timed-out request ends it |
 | Windows R 3.6 | **Not demonstrated.** CRAN ships no binary; needs Rtools 3.5 |
 
 ## Open, in rough priority order
 
-1. **A heartbeat that survives a long single job.** The current one renews
+1. **A worker that survives a blip.** One timed-out request makes `call()` in
+   `R/join.R` conclude the host is gone, and the worker stops for good --
+   measured: a 25-second blackout removed a worker 15 seconds before its link
+   came back, discarding a finished chunk with it. The fleet stays correct,
+   because the lease lapses and the chunk is reissued, but the machine is
+   lost. Needs a bounded retry before giving up, and a way to tell "the host
+   shut down because the jobset finished" from "the link is down", which the
+   current code cannot distinguish. Demonstrated by
+   `docker/docker-compose.partition.yml`, which fails today on purpose.
+2. **A heartbeat that survives a long single job.** The current one renews
    between jobs, so a job longer than the lease is still beyond reach. Needs
    something that can renew while a call is in flight -- async, promises, or a
    background process. Blocking for workloads with minutes-long jobs, such as
    a model run inside a sensitivity analysis.
-2. **Progress and projected finish.** The ledger already has the timestamps.
-3. **Prefetched per-client queues**, if round trips ever start to matter.
-4. **Abort a chunk whose lease was lost.** A worker told it no longer holds the
+3. **Progress and projected finish.** The ledger already has the timestamps.
+4. **Prefetched per-client queues**, if round trips ever start to matter.
+5. **Abort a chunk whose lease was lost.** A worker told it no longer holds the
    lease currently finishes the chunk anyway; the submit is a harmless
    duplicate, but the work is wasted. Stopping early is easy serially and
    awkward across cores, where the tasks are already in flight.

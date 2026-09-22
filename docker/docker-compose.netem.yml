@@ -1,0 +1,113 @@
+# The impaired-network scenario.
+#
+#   docker/run.sh docker/docker-compose.netem.yml
+#
+# Use run.sh, not `up --exit-code-from host`: that flag aborts the whole run
+# the moment any container stops, including a worker that has dropped out --
+# which is the event this scenario exists to observe. See docker/README.md.
+#
+# Intermittency is the condition this package exists for -- a laptop on a bad
+# link, a friend in another country, a machine that goes dark mid-chunk -- and
+# until this file existed it was tested by hoping. Here it is asserted.
+#
+# Two workers, deliberately:
+#
+#   worker-steady  a clean link, so the jobset always has a way to finish
+#   worker-flaky   150ms +/- 50ms of delay and 5% loss on everything it sends
+#
+# The host is told to expect TWO distinct machines in the results, and that is
+# the whole point. If the impaired worker cannot get through its handshake, or
+# quits the first time a request is dropped, the jobset still completes -- the
+# steady worker would do all of it -- but only one host appears and the run
+# FAILS. The assertion is therefore about surviving the bad link, not merely
+# about finishing.
+
+name: jobr-netem
+
+services:
+  host:
+    networks: [jobr]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        R_VERSION: "4.4.1"
+    command: ["Rscript", "/opt/jobr/docker/host.R"]
+    environment:
+      JOBR_PASSPHRASE: testbed-alpha-bravo-charlie
+      # Sized so the run lasts long enough for the impaired worker to join,
+      # contribute, vanish for the whole of a partition and come back. Too
+      # small a jobset and the steady worker finishes it alone before the
+      # flaky one has even got through its handshake, which would fail the
+      # two-host assertion for a reason that has nothing to do with the link.
+      JOBR_JOBS: "200"
+      JOBR_CHUNKSIZE: "5"
+      JOBR_SECONDS: "0.5"
+      # Short, so that a lease actually lapses during a partition and the work
+      # is reclaimed while the run is still going. With the default lease
+      # nothing would ever be reissued and the reclamation path would go
+      # untested again.
+      JOBR_LEASE: "15"
+      JOBR_EXPECT_HOSTS: "2"
+      JOBR_DEADLINE: "300"
+
+  worker-steady:
+    networks: [jobr]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        R_VERSION: "4.4.1"
+    command: ["Rscript", "/opt/jobr/docker/worker.R"]
+    depends_on: [host]
+    environment:
+      JOBR_PASSPHRASE: testbed-alpha-bravo-charlie
+      JOBR_URL: tcp://host:5555
+      JOBR_CORES: "1"
+
+  worker-flaky:
+    networks: [jobr]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        R_VERSION: "4.4.1"
+    command: ["Rscript", "/opt/jobr/docker/worker.R"]
+    depends_on: [host]
+    environment:
+      JOBR_PASSPHRASE: testbed-alpha-bravo-charlie
+      JOBR_URL: tcp://host:5555
+      JOBR_CORES: "1"
+      # Refuse to join until the link is measurably bad. Without this the
+      # worker would race the sidecar, sometimes do its whole handshake over a
+      # clean network, and the run would claim to have tested something it did
+      # not.
+      JOBR_REQUIRE_RTT_MS: "120"
+      # A request timeout has to exceed the round trip by enough to leave room
+      # for the delay plus jitter, or every request times out and the test is
+      # measuring an impossible link rather than a bad one.
+      JOBR_TIMEOUT_MS: "8000"
+      JOBR_PING_MS: "4000"
+
+  # Shares worker-flaky's network namespace and shapes its link from outside.
+  # It has no `networks:` of its own -- network_mode means it has worker-flaky's.
+  netem:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.netem
+    network_mode: "service:worker-flaky"
+    cap_add: [NET_ADMIN]
+    depends_on: [worker-flaky]
+    environment:
+      NETEM_DELAY: "150ms"
+      NETEM_JITTER: "50ms"
+      NETEM_LOSS: "5%"
+      # No blackout here: this file tests a persistently BAD link, not a
+      # broken one. For the machine-goes-dark case, overlay
+      # docker-compose.partition.yml -- and read what it says before you do.
+      NETEM_PARTITION_AT: "0"
+      NETEM_PARTITION_FOR: "0"
+
+networks:
+  jobr:
+    driver: bridge

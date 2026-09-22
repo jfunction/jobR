@@ -1,0 +1,60 @@
+# Overlay: the machine goes dark mid-run.
+#
+#   docker/run.sh docker/docker-compose.netem.yml docker/docker-compose.partition.yml
+#
+# Read this before running it: AS OF THIS COMMIT, THIS SCENARIO FAILS, and the
+# failure is the point. It is written to state a requirement the package does
+# not yet meet, so that meeting it is verifiable rather than asserted.
+#
+# What it does. The impaired worker's link drops to 100% loss 30 seconds in
+# and stays dark for 25 -- longer than the 15-second lease, so whatever chunk
+# it was holding lapses and is reissued to someone else while it is gone. Then
+# the link comes back.
+#
+# Why the steady worker is capped. Without a cap this scenario passes while
+# demonstrating nothing: the healthy worker quietly finishes the jobset alone,
+# every assertion holds, and the impaired worker's disappearance never shows
+# up. Capping it at 20 of the 40 chunks means the remaining 20 can ONLY be
+# done by the impaired worker, so "all 40 chunks done" is true if and only if
+# that worker came back. The existing assertions then carry the weight; no new
+# assertion machinery is needed.
+#
+# What actually happens today, measured, and reproduced on a second run:
+#
+#   07:37:44.5  link goes dark
+#   07:37:53.9  "host vanished before chunk 22 was accepted" -- worker exits
+#   07:38:09.5  link comes back, 15.6 seconds too late for anyone to notice
+#
+# and the run ends:
+#
+#   == FAILED ==
+#     - jobs not covered exactly once: 145 rows, 145 distinct ids, expected 200
+#     - 11 of 40 chunks are not done
+#
+# One timed-out request ends the worker's participation permanently. The
+# request was a submit, so a finished chunk was thrown away too. Nothing
+# retries, and nothing restarts it. On the intermittent links this package
+# exists for, that is the difference between a friend donating a laptop for an
+# afternoon and a friend babysitting an R session.
+
+services:
+  host:
+    environment:
+      # A failing run should fail fast. If the impaired worker never comes
+      # back, the last 20 chunks are never done and the host waits out this
+      # deadline before saying so. A passing run needs roughly 90 seconds.
+      JOBR_DEADLINE: "150"
+
+  worker-steady:
+    environment:
+      JOBR_MAX_CHUNKS: "20"
+      JOBR_MAX_SECONDS: "150"
+
+  worker-flaky:
+    environment:
+      JOBR_MAX_SECONDS: "150"
+
+  netem:
+    environment:
+      NETEM_PARTITION_AT: "30"
+      NETEM_PARTITION_FOR: "25"

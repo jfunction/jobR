@@ -1,0 +1,9 @@
+# These are executed inside Linux containers and on CI runners. A CRLF
+# checkout on Windows puts a carriage return in the shebang, and the container
+# fails with a "no such file or directory" that names an interpreter that is
+# plainly there. Pin them to LF regardless of core.autocrlf.
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+Dockerfile.*    text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf

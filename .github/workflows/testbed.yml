@@ -35,10 +35,40 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run the mixed-version testbed
         run: |
-          docker compose -f docker/docker-compose.yml up             --build --abort-on-container-exit --exit-code-from host
+          docker compose -f docker/docker-compose.yml up --build --abort-on-container-exit --exit-code-from host
       - name: Show logs on failure
         if: failure()
         run: docker compose -f docker/docker-compose.yml logs --no-color
       - name: Tear down
         if: always()
         run: docker compose -f docker/docker-compose.yml down -v
+
+  # The same package over a link that is genuinely bad: 150ms +/- 50ms of
+  # delay and 5% loss on one worker, shaped with tc netem from a sidecar. The
+  # assertion is that TWO machines appear in the results, so a worker that
+  # cannot survive its link fails the job rather than being quietly carried by
+  # the healthy one.
+  #
+  # docker-compose.partition.yml is deliberately NOT run here. It asserts that
+  # a worker rejoins after its link goes dark, which the package does not yet
+  # do -- see docker/README.md. Wiring it in now would just paint CI red
+  # without telling anyone anything they cannot already read there.
+  impaired:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the kernel can actually shape a link
+        # netem needs sch_netem. If it is missing, every impaired run would
+        # silently be an unimpaired one -- except that the worker's RTT gate
+        # would stall instead, and the failure would look like a dead host.
+        # Fail here, where the message is honest.
+        run: |
+          docker run --rm --cap-add NET_ADMIN alpine:3.20 sh -c 'apk add --no-cache iproute2 >/dev/null && tc qdisc add dev eth0 root netem delay 10ms && tc qdisc show dev eth0'
+      # run.sh streams every container's logs into this step's output, so
+      # there is no separate "show logs on failure" step to add here.
+      - name: Run the impaired-network scenario
+        run: docker/run.sh docker/docker-compose.netem.yml
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker/docker-compose.netem.yml down -v
