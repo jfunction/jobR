@@ -25,9 +25,20 @@ nothing was released before it.
   process stays free to talk to the host. `max_chunk_seconds` bounds this for a
   job that has hung rather than merely taken a long time.
 * A worker **reconnects** rather than treating one unanswered request as proof
-  the host has gone, retrying with backoff for `reconnect_seconds`.
+  the host has gone, retrying with backoff for `reconnect_seconds`, and
+  **enrols again** if the host restarted and has forgotten the tokens it issued.
 * The host **stays up briefly** after the last chunk so that workers learn the
   jobset finished instead of inferring it from silence.
+* Results that cannot be delivered are **kept on disk** rather than discarded,
+  survive the R session ending, and are handed over before the worker claims
+  anything new. `jobr_spool()` shows what a machine is holding;
+  `jobr_spool_clear()` discards it, and `spool_max_age` does so on its own once
+  a host has plainly not come back.
+* A returning worker **asks before uploading**, so a result for a chunk somebody
+  else has already finished costs one small message rather than the whole
+  transfer.
+* A worker **stops** a chunk the host reports as already finished, instead of
+  computing an answer that exists.
 
 ## Getting work onto other machines
 
@@ -46,7 +57,11 @@ nothing was released before it.
 
 * Workers are authenticated by passphrase only. Mutual TLS is not reachable
   through nanonext's API; see `?security`.
+* A worker survives the host restarting, but not its own R session ending: it
+  keeps its results, and must be started again by hand.
 * A worker holds one chunk at a time, not a prefetched queue.
-* Nothing projects a finish time, and nothing aborts a running chunk.
+* Nothing projects a finish time. A chunk is stopped only when the host reports
+  it already finished elsewhere; a chunk that merely lost its lease, or outstayed
+  `max_chunk_seconds`, runs to the end.
 * R 3.6 is the floor. On Windows that requires Rtools 3.5, since CRAN ships no
   binary for it.

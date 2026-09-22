@@ -50,7 +50,10 @@ So jobR targets the case that ecosystem leaves out:
 - **Bandwidth is the scarce resource, not CPU.** Bundles are content-addressed,
   so a returning worker transfers nothing when the project has not changed.
 - **Intermittency is normal.** Power cuts, closed lids, dropped links. Work is
-  leased, not merely sent, so anything abandoned is reissued automatically.
+  leased, not merely sent, so anything abandoned is reissued automatically — and
+  a worker that finishes a chunk it cannot deliver keeps the results on disk and
+  hands them over when the host comes back, rather than throwing away the hour
+  it spent computing them.
 - **Credentials are speakable.** A passphrase you can read down a phone line
   beats a certificate you have to transfer somehow first.
 

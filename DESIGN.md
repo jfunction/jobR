@@ -74,6 +74,11 @@ reopen finished work, and two workers cannot ping-pong a chunk indefinitely.
 This is also what makes a duplicate submit harmless, which several other
 decisions rely on.
 
+Only the worker currently holding a lease may renew it or hand the chunk back.
+Both are guarded the same way, and for the same reason: without the guard, a
+worker whose lease lapsed while it was computing could reopen a chunk that now
+belongs to somebody else, taking it out from under a worker busy on it.
+
 A worker holds exactly one chunk at a time. See *Deliberate limits*.
 
 ### Renewing a lease while work runs
@@ -122,6 +127,19 @@ Three costs, all real:
   limit, because only the person who wrote the jobs knows how long they ought to
   take.
 
+A refused renewal carries a reason, because two quite different situations
+otherwise look identical to the worker and only the host can tell them apart.
+**Finished by somebody else** means every further second is spent on an answer
+that already exists, so the worker stops: `mirai::stop_mirai()` cancels the
+tasks already dispatched, rather than leaving them to burn the cores of a
+machine that was donating them. **Merely reassigned** means the worker now
+holding it may itself die, and a completed result can still be offered, so the
+worker carries on.
+
+Giving up that way raises a `jobr_abandoned` condition rather than an error.
+`max_failures` exists to notice a machine that is broken, and a chunk taken
+away by the scheduler says nothing about the machine that was running it.
+
 ### Surviving a dropped link
 
 Silence from the host does not mean the host is gone. On an intermittent link it
@@ -153,14 +171,56 @@ dead link stalls the very thing the lease protects. If they do not get through
 the lease lapses, which is what a lease is for.
 
 The submit is the opposite case and gets the whole budget: the work is already
-done, and giving up throws it away. Resubmitting a chunk that lapsed and was
-reissued costs nothing, because completion is terminal.
+done. Resubmitting a chunk that lapsed and was reissued costs nothing, because
+completion is terminal — and if the budget runs out, the results are kept
+rather than discarded. See *Results that cannot be delivered yet*.
+
+A host that has restarted is a special case of silence that is not silent at
+all: it answers, and what it says is `not authenticated`, because `host_new()`
+begins with no tokens and has forgotten every one it issued. Treating that as
+terminal dismissed every worker attached to a host whenever it bounced, which
+on a machine meant to run for weeks turns a blip into an outage. The worker
+still holds the passphrase, so it enrols again and carries on. A refusal of the
+enrolment itself is still terminal: that means the passphrase has changed, or
+this is a different host.
+
+### Results that cannot be delivered yet
+
+The host keeps a durable ledger. The worker keeps a spool, for the same reason
+and against the opposite risk: it is the machine on the unreliable link, and it
+is the one holding work that has already been paid for. A submit that cannot get
+through writes its results to disk instead of discarding them, so a moment's
+outage no longer costs however long the chunk took to compute.
+
+The spool outlives the R session, and a worker delivers whatever it is holding
+**before** claiming anything new — completed work is at risk until the host has
+it, whereas work not yet claimed is at risk of nothing.
+
+It does not live in the project cache. That cache is a cache: discardable, and
+re-fetchable from the host. A spooled result is the only copy of something that
+cannot be recovered, so it lives in the user's data directory rather than in
+`tempdir()`, which R removes when the session ends.
+
+Before uploading, the worker **offers**: it names the chunks it is holding and
+the host replies with the ones it still wants. A spooled result can be large,
+and sending one for a chunk somebody else has already finished spends bandwidth
+to achieve nothing — which on a metered link is the difference between the spool
+being safe and the spool being cheap. A host that does not know the `offer`
+operation refuses it, and the worker falls back to offering everything.
+
+Results cannot wait indefinitely: `spool_max_age` discards them once a host has
+plainly not come back. `jobr_spool()` shows what a machine is holding and
+`jobr_spool_clear()` throws it away, because nobody will think to look in a
+data directory.
 
 ### Credentials
 
 A spoken passphrase enrols a worker; the host issues an opaque session token in
-exchange. Anyone holding the passphrase may contribute, and tokens die with the
-host process.
+exchange. Anyone holding the passphrase may contribute.
+
+Tokens die with the host process, and are not meant to outlive it. The
+passphrase is the durable credential; the token is a session handle, and a
+worker that finds its handle refused simply presents the passphrase again.
 
 Credentials are human-transferable by design — a passphrase can be read down a
 phone line — which was the right instinct in the original and is preserved.
@@ -245,10 +305,14 @@ finish. `jobr_estimate()` predicts a *benchmark* run from arithmetic, but the
 host does not track throughput. The ledger timestamps every assignment and
 completion, so this is a reporting feature rather than a redesign.
 
-**Nothing aborts a running chunk.** `max_chunk_seconds` stops a worker renewing
-the lease on a chunk that has outstayed its budget, which lets the host reissue
-it, but the original worker carries on to the end. Stopping it early is easy
-serially and awkward across cores, where the tasks are already in flight.
+**A chunk is abandoned only when it is provably pointless.** A worker stops
+when the host tells it the chunk is already finished, and not otherwise. It
+keeps going when the chunk was merely reassigned, because the worker holding it
+now may die and the result can still be offered; and `max_chunk_seconds` stops
+the *renewals* on a chunk that has outstayed its budget without stopping the
+work, so the host may reissue it while the original worker runs on. Both are
+deliberate: with a spool and an offer behind it, finishing costs one small
+message to find out whether anybody still wants the answer.
 
 ---
 
@@ -280,6 +344,11 @@ Different claims rest on different evidence, and they are not interchangeable.
 | A bad link (delay and packet loss) | `docker/docker-compose.netem.yml`: a worker behind `tc netem` carries its share, every job exactly once |
 | A lease renewed during a single long job | A unit test counting renewals through one job longer than the interval, and an integration test where one job outlives its lease with a rival worker waiting to claim it. Both are run against in-process execution as well, so they are known to discriminate |
 | A link that goes dark mid-run | `docker/docker-compose.partition.yml`: a worker survives a total blackout longer than its lease and finishes the jobset, with the other worker capped so nothing else could have |
+| Results surviving a host that vanishes | An integration test kills the host mid-chunk and finds the results on the worker's disk, not in the jobset |
+| Delivering results from an earlier session | An integration test spools a result, starts a worker, and finds it delivered before any new chunk is claimed |
+| Not uploading what the host already has | An integration test spools a deliberately wrong result for a chunk another worker then completes; the holder discards it unsent, and the answers stay correct |
+| Re-enrolling when the host restarts | An integration test restarts the host under a running worker, which finishes the jobset across the restart |
+| Abandoning a chunk finished elsewhere | A unit test drives `run_chunk()` with a heartbeat that refuses, and checks it stops promptly rather than running the chunk out |
 | Load-proportional distribution | **Not demonstrated.** Containers on one host all run at the same speed |
 | Windows R 3.6 | **Not demonstrated.** CRAN ships no binary; Rtools 3.5 would be required |
 
@@ -289,6 +358,7 @@ Different claims rest on different evidence, and they are not interchangeable.
 
 1. **Progress and projected finish.** The ledger already has the timestamps.
 2. **Prefetched per-client queues**, if round trips ever start to matter.
-3. **Abort a chunk whose lease was lost**, rather than finishing work that
-   someone else has already been given. The duplicate submit is harmless, but
-   the CPU time is wasted. See *Deliberate limits*.
+3. **A worker that restarts itself.** A worker survives a host restart and
+   keeps its results across a session, but if its own R session dies it must be
+   started again by hand. On an always-on lab machine that is the remaining
+   piece of unattended operation.
