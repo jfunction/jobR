@@ -18,6 +18,8 @@ jobr_join(
   renew_seconds = NULL,
   reconnect_seconds = 60,
   max_chunk_seconds = Inf,
+  spool_dir = jobr_data_dir("spool"),
+  spool_max_age = 7 * 24 * 3600,
   use_host_packages = TRUE,
   quiet = FALSE
 )
@@ -65,6 +67,15 @@ job that has hung looks exactly like one that is merely slow, and both
 hold their chunk indefinitely. This is the cap on that. The default never
 gives up, because only the person who wrote the jobs knows how long they
 ought to take.}
+
+\item{spool_dir}{Where to keep results that could not be delivered, so that
+they survive this R session and are offered again on the next join. See
+\link{spool}. \code{NULL} disables spooling, and undelivered results are lost as
+soon as the worker stops.}
+
+\item{spool_max_age}{Discard spooled results older than this, in seconds,
+checked when joining. A host that never comes back would otherwise leave
+them on disk indefinitely.}
 
 \item{use_host_packages}{When the host serves a package repository, fetch
 missing packages from it rather than from CRAN. FALSE always uses CRAN.}

@@ -45,6 +45,13 @@ NULL
 #'   hold their chunk indefinitely. This is the cap on that. The default never
 #'   gives up, because only the person who wrote the jobs knows how long they
 #'   ought to take.
+#' @param spool_dir Where to keep results that could not be delivered, so that
+#'   they survive this R session and are offered again on the next join. See
+#'   [spool]. `NULL` disables spooling, and undelivered results are lost as
+#'   soon as the worker stops.
+#' @param spool_max_age Discard spooled results older than this, in seconds,
+#'   checked when joining. A host that never comes back would otherwise leave
+#'   them on disk indefinitely.
 #' @param use_host_packages When the host serves a package repository, fetch
 #'   missing packages from it rather than from CRAN. FALSE always uses CRAN.
 #' @param max_seconds Give up after this long.
@@ -58,11 +65,24 @@ jobr_join <- function(url, passphrase,
                       poll_seconds = 2, max_chunks = Inf, max_seconds = Inf,
                       max_failures = 5L, renew_seconds = NULL,
                       reconnect_seconds = 60, max_chunk_seconds = Inf,
+                      # jobr_data_dir(), not spool_dir(): a default argument is
+                      # evaluated in this function's own frame, where the name
+                      # spool_dir is the promise being evaluated, and R stops
+                      # with "recursive default argument reference".
+                      spool_dir = jobr_data_dir("spool"),
+                      spool_max_age = 7 * 24 * 3600,
                       use_host_packages = TRUE, quiet = FALSE) {
   sock <- nanonext::socket("req", dial = url, tls = tls)
   on.exit(close(sock), add = TRUE)
   started <- unix_time()
   why <- NULL
+
+  # Set once the host has issued a token, and replaced if it ever issues
+  # another. `reauthing` stops re-enrolment recursing: the hello that renews a
+  # token is itself a call(), and a host that rejected it would otherwise send
+  # us round again.
+  token <- NULL
+  reauthing <- FALSE
 
   # One exchange. Returns NULL if nothing came back, and records why.
   attempt <- function(req, block) {
@@ -105,8 +125,39 @@ jobr_join <- function(url, passphrase,
   # the lease heartbeat, and handing a chunk back after a failure. Both are
   # advisory -- if they do not get through, the lease simply lapses, which is
   # exactly what it is for.
+  # A host that has restarted has forgotten every token it ever issued --
+  # host_new() starts with none -- so it answers a worker that was mid-jobset
+  # with "not authenticated". That is not a credential problem: this worker
+  # still holds the passphrase, and the honest response is to introduce itself
+  # again rather than to stop. Without this, restarting a host silently
+  # dismisses every worker attached to it, which on a machine that is meant to
+  # run for weeks is the difference between a blip and an outage.
+  reauth <- function() {
+    if (reauthing) return(FALSE)
+    reauthing <<- TRUE
+    on.exit(reauthing <<- FALSE, add = TRUE)
+    again <- call(list(op = "hello", passphrase = passphrase,
+                       r_version = r_version_string()), fatal = FALSE)
+    # A refusal here is real: the passphrase has changed, or this is a
+    # different host altogether. Stopping is then correct.
+    if (!isTRUE(again$ok)) return(FALSE)
+    token <<- again$token
+    if (!quiet) message("  the host restarted; re-enrolled and carrying on")
+    TRUE
+  }
+
   call <- function(req, fatal = TRUE, retry = TRUE, block = timeout_ms) {
     reply <- attempt(req, block)
+
+    # An authenticated request refused for authentication alone is worth one
+    # more try with a fresh token. Anything else the host says is its answer.
+    if (!is.null(reply) && !isTRUE(reply$ok) && !is.null(req$token) &&
+        identical(reply$error, "not authenticated") && reauth()) {
+      req$token <- token
+      again <- attempt(req, block)
+      if (!is.null(again)) return(again)
+    }
+
     if (!is.null(reply)) return(reply)
     redial()
 
@@ -139,6 +190,7 @@ jobr_join <- function(url, passphrase,
   hi <- call(list(op = "hello", passphrase = passphrase,
                   r_version = r_version_string()))
   if (!isTRUE(hi$ok)) stop("could not join: ", hi$error, call. = FALSE)
+  token <- hi$token
   if (!quiet) message("joined '", hi$project, "': ", hi$n_jobs, " jobs in ",
                       hi$n_chunks, " chunks")
   if (!quiet) for (w in version_skew_warnings(hi$host_r_version)) message("note: ", w)
@@ -154,7 +206,7 @@ jobr_join <- function(url, passphrase,
     }
     missing <- tryCatch(
       repo_pull_install(call, missing, file.path(cache_dir, "repo"),
-                        token = hi$token, quiet = quiet),
+                        token = token, quiet = quiet),
       error = function(e) {
         if (!quiet) message("  could not install from the host: ",
                             conditionMessage(e))
@@ -168,10 +220,38 @@ jobr_join <- function(url, passphrase,
          "\ninstall them, then join again", call. = FALSE)
   }
 
+  # Anything this machine computed for this jobset but never managed to hand
+  # over. Delivered before asking for new work: those results are CPU already
+  # spent, and they are at risk until the host has them, whereas work not yet
+  # claimed is at risk of nothing.
+  drain_spool <- function() {
+    if (is.null(spool_dir)) return(invisible(0L))
+    have <- spool_list(hi$jobset, dir = spool_dir)
+    if (!nrow(have)) return(invisible(0L))
+    if (!quiet) message("delivering ", nrow(have), " chunk(s) held from an ",
+                        "earlier session")
+    sent <- 0L
+    for (i in seq_len(nrow(have))) {
+      entry <- spool_read(have$path[i])
+      if (is.null(entry)) { spool_drop(have$path[i]); next }
+      r <- call(list(op = "submit", token = token, chunk = entry$chunk,
+                     results = entry$results), fatal = FALSE)
+      # Only discard once the host has said it has them. A failed delivery
+      # leaves the file exactly where it was for the next attempt.
+      if (is.null(r) || !isTRUE(r$ok)) break
+      spool_drop(have$path[i])
+      sent <- sent + 1L
+      if (!quiet) message("  chunk ", entry$chunk, " delivered late")
+    }
+    invisible(sent)
+  }
+
+  if (!is.null(spool_dir)) spool_expire(spool_max_age, dir = spool_dir)
+
   project_dir <- file.path(cache_dir, hi$project)
   if (bundle_stale(project_dir, hi$hash)) {
     if (!quiet) message("fetching project bundle...")
-    b <- call(list(op = "bundle", token = hi$token))
+    b <- call(list(op = "bundle", token = token))
     zipfile <- tempfile(fileext = ".zip")
     writeBin(b$data, zipfile)
     unlink(project_dir, recursive = TRUE)
@@ -227,7 +307,8 @@ jobr_join <- function(url, passphrase,
   repeat {
     if (unix_time() - started > max_seconds) break
     if (done >= max_chunks) break
-    cl <- call(list(op = "claim", token = hi$token), fatal = FALSE)
+    drain_spool()
+    cl <- call(list(op = "claim", token = token), fatal = FALSE)
     if (is.null(cl)) {
       if (!quiet) message("the host is still unreachable after ",
                           round(reconnect_seconds), "s, stopping")
@@ -257,7 +338,7 @@ jobr_join <- function(url, passphrase,
       # so a heartbeat that waits out a dead link stalls the very work the
       # lease is protecting. If it does not get through, the lease lapses --
       # which is what a lease is for.
-      r <- call(list(op = "renew", token = hi$token, chunk = cl$chunk),
+      r <- call(list(op = "renew", token = token, chunk = cl$chunk),
                 fatal = FALSE, retry = FALSE,
                 block = min(timeout_ms, 2000))
       # A refusal means the lease lapsed and the chunk now belongs to someone
@@ -278,7 +359,7 @@ jobr_join <- function(url, passphrase,
       # error. Someone else, or this worker on a later pass, can retry it.
       # Advisory: if it does not arrive, the lease lapses and the chunk is
       # reissued anyway. Not worth spending the reconnect budget on.
-      call(list(op = "fail", token = hi$token, chunk = cl$chunk),
+      call(list(op = "fail", token = token, chunk = cl$chunk),
            fatal = FALSE, retry = FALSE)
       consecutive_failures <- consecutive_failures + 1L
       if (!quiet) message("  chunk ", cl$chunk, " failed: ", conditionMessage(out))
@@ -300,12 +381,31 @@ jobr_join <- function(url, passphrase,
     # already done, and giving up here throws it away. A duplicate submit is
     # harmless -- completion is terminal in the ledger -- so resubmitting a
     # chunk that lapsed and was reissued costs nothing but the bytes.
-    sub <- call(list(op = "submit", token = hi$token, chunk = cl$chunk,
+    sub <- call(list(op = "submit", token = token, chunk = cl$chunk,
                      results = out), fatal = FALSE)
     if (is.null(sub)) {
+      # The work is done and the only copy is in this process. Discarding it
+      # here is what used to happen, and it meant a blink of the network cost
+      # however long the chunk took to compute. Write it down instead; the
+      # next loop, or the next session, delivers it.
+      if (is.null(spool_dir)) {
+        if (!quiet) message("could not deliver chunk ", cl$chunk,
+                            " and spooling is off; it will be reissued")
+        break
+      }
+      kept <- tryCatch({
+        spool_write(hi$jobset, cl$chunk, out, dir = spool_dir)
+        TRUE
+      }, error = function(e) {
+        if (!quiet) message("could not spool chunk ", cl$chunk, ": ",
+                            conditionMessage(e))
+        FALSE
+      })
+      if (!kept) break
       if (!quiet) message("could not deliver chunk ", cl$chunk,
-                          " before giving up on the host; it will be reissued")
-      break
+                          " -- held on disk, will be offered again")
+      done <- done + 1L
+      next
     }
     done <- done + 1L
 
@@ -322,7 +422,7 @@ jobr_join <- function(url, passphrase,
   # stopped waiting for anyone and is very likely gone. Best effort and
   # deliberately cheap: if it does not arrive, the host's linger caps the wait.
   if (!told_done) {
-    call(list(op = "bye", token = hi$token), fatal = FALSE, retry = FALSE,
+    call(list(op = "bye", token = token), fatal = FALSE, retry = FALSE,
          block = min(timeout_ms, 2000))
   }
 

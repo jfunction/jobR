@@ -25,11 +25,16 @@ await_host <- function(p) {
   p
 }
 
-start_worker <- function(url, phrase, cache = tempfile("cache-"), max_seconds = 60) {
-  bg(function(url, phrase, cache, max_seconds) {
-    jobr_join(url, phrase, cache_dir = cache, quiet = TRUE,
+# Every worker gets its own spool. The default is the user's real data
+# directory, which a test suite has no business writing to -- and sharing one
+# between tests would let an undelivered result from one leak into the next.
+start_worker <- function(url, phrase, cache = tempfile("cache-"), max_seconds = 60,
+                         spool = tempfile("spool-")) {
+  bg(function(url, phrase, cache, max_seconds, spool) {
+    jobr_join(url, phrase, cache_dir = cache, quiet = TRUE, spool_dir = spool,
               max_seconds = max_seconds)
-  }, list(url = url, phrase = phrase, cache = cache, max_seconds = max_seconds))
+  }, list(url = url, phrase = phrase, cache = cache, max_seconds = max_seconds,
+          spool = spool))
 }
 
 # ---- the happy path ---------------------------------------------------------
@@ -319,6 +324,7 @@ test_that("a chunk outliving its lease is not stolen from a live worker", {
 
   a <- bg(function(url, phrase, cache) {
     jobr_join(url, phrase, cache_dir = cache, quiet = TRUE,
+              spool_dir = file.path(cache, "spool"),
               renew_seconds = 1, max_seconds = 110)
   }, list(url = url, phrase = phrase, cache = tempfile("cache-")))
   on.exit(kill_quietly(a), add = TRUE)
@@ -331,6 +337,7 @@ test_that("a chunk outliving its lease is not stolen from a live worker", {
              timeout = 30, what = "first worker to claim the chunk")
   b <- bg(function(url, phrase, cache) {
     jobr_join(url, phrase, cache_dir = cache, quiet = TRUE,
+              spool_dir = file.path(cache, "spool"),
               poll_seconds = 1, max_seconds = 110)
   }, list(url = url, phrase = phrase, cache = tempfile("cache-")))
   on.exit(kill_quietly(b), add = TRUE)
@@ -358,6 +365,7 @@ test_that("successive over-long chunks each stay with the worker running them", 
 
   a <- bg(function(url, phrase, cache) {
     jobr_join(url, phrase, cache_dir = cache, quiet = TRUE,
+              spool_dir = file.path(cache, "spool"),
               renew_seconds = 1, max_seconds = 140)
   }, list(url = url, phrase = phrase, cache = tempfile("cache-")))
   on.exit(kill_quietly(a), add = TRUE)
@@ -367,6 +375,7 @@ test_that("successive over-long chunks each stay with the worker running them", 
 
   b <- bg(function(url, phrase, cache) {
     jobr_join(url, phrase, cache_dir = cache, quiet = TRUE,
+              spool_dir = file.path(cache, "spool"),
               renew_seconds = 1, poll_seconds = 1, max_seconds = 140)
   }, list(url = url, phrase = phrase, cache = tempfile("cache-")))
   on.exit(kill_quietly(b), add = TRUE)
@@ -394,6 +403,7 @@ test_that("a worker that dies still loses its lease despite having renewed", {
 
   victim <- bg(function(url, phrase, cache) {
     jobr_join(url, phrase, cache_dir = cache, quiet = TRUE,
+              spool_dir = file.path(cache, "spool"),
               renew_seconds = 1, max_seconds = 110)
   }, list(url = url, phrase = phrase, cache = tempfile("cache-")))
   on.exit(kill_quietly(victim), add = TRUE)
@@ -585,6 +595,7 @@ test_that("a single job longer than the lease keeps its chunk", {
 
   a <- bg(function(url, phrase, cache) {
     jobr_join(url, phrase, cache_dir = cache, quiet = TRUE,
+              spool_dir = file.path(cache, "spool"),
               renew_seconds = 1, max_seconds = 140)
   }, list(url = url, phrase = phrase, cache = tempfile("cache-")))
   on.exit(kill_quietly(a), add = TRUE)
@@ -596,6 +607,7 @@ test_that("a single job longer than the lease keeps its chunk", {
              timeout = 60, what = "the first worker to claim the chunk")
   b <- bg(function(url, phrase, cache) {
     jobr_join(url, phrase, cache_dir = cache, quiet = TRUE,
+              spool_dir = file.path(cache, "spool"),
               poll_seconds = 1, max_seconds = 140)
   }, list(url = url, phrase = phrase, cache = tempfile("cache-")))
   on.exit(kill_quietly(b), add = TRUE)
@@ -608,4 +620,133 @@ test_that("a single job longer than the lease keeps its chunk", {
   # chunk unrenewed for its whole 12 seconds, the lease lapses at 4, worker B
   # takes it, and this becomes 2.
   expect_equal(assigns_per_chunk(work, "test", 1), 1L)
+})
+
+
+# ---- surviving the host restarting ------------------------------------------
+# A host that restarts has forgotten every token it issued, so it answers a
+# worker that was mid-jobset with "not authenticated". Treating that as
+# terminal dismisses every attached worker whenever the host bounces, which on
+# a machine meant to run for weeks turns a blip into an outage.
+#
+# The existing "a jobset resumes after the host process is killed" test starts
+# a FRESH worker against the new host, so it never exercised this.
+
+test_that("a worker re-enrols when the host restarts under it", {
+  skip_unless_integration()
+  work <- tempfile("host-"); proj <- write_slow_project(tempfile("proj-"), seconds = 1)
+  url <- test_url(); phrase <- "xray-yankee-zulu-alpha"
+  spool <- tempfile("spool-")
+
+  h1 <- start_host(work, proj, n_jobs = 24, chunksize = 2, url = url,
+                   phrase = phrase, lease = 30, max_seconds = 150)
+  on.exit(kill_quietly(h1), add = TRUE)
+  await_host(h1)
+
+  w <- bg(function(url, phrase, cache, spool) {
+    jobr_join(url, phrase, cache_dir = cache, quiet = TRUE, spool_dir = spool,
+              reconnect_seconds = 90, max_seconds = 140)
+  }, list(url = url, phrase = phrase, cache = tempfile("cache-"), spool = spool))
+  on.exit(kill_quietly(w), add = TRUE)
+
+  # Let it get properly under way before pulling the host out.
+  wait_until(function() {
+    length(list.files(file.path(work, "results", "test"))) >= 3
+  }, timeout = 60, what = "the worker to complete some chunks")
+
+  kill_quietly(h1)
+  Sys.sleep(2)
+  expect_true(w$is_alive())
+
+  # Same address, same work directory: the ledger carries the progress over,
+  # but the token the worker is holding is now meaningless.
+  h2 <- start_host(work, proj, n_jobs = 24, chunksize = 2, url = url,
+                   phrase = phrase, lease = 30, max_seconds = 150)
+  on.exit(kill_quietly(h2), add = TRUE)
+  await_host(h2)
+
+  wait_until(function() !w$is_alive(), timeout = 150,
+             what = "the worker to finish against the second host")
+
+  # The same worker process finished the jobset across the restart. Without
+  # re-enrolment it would have stopped at the first rejected claim.
+  expect_equal(collected(work, "test"), serial_expectation(24), ignore_attr = TRUE)
+  expect_true(all(expect_ledger_sane(work, "test", 12)$state == "done"))
+})
+
+# ---- results outliving the connection ---------------------------------------
+# The host keeps a durable ledger; the worker used to keep nothing. A submit
+# that failed discarded the results outright, so a blink of the network cost
+# however long the chunk took to compute and the work was done twice.
+
+test_that("results survive a host that vanishes before they can be delivered", {
+  skip_unless_integration()
+  work <- tempfile("host-"); proj <- write_demo_project(tempfile("proj-"))
+  url <- test_url(); phrase <- "bravo-charlie-delta-echo"
+  spool <- tempfile("spool-")
+
+  h <- start_host(work, proj, n_jobs = 5, chunksize = 5, url = url,
+                  phrase = phrase, lease = 30, max_seconds = 60)
+  on.exit(kill_quietly(h), add = TRUE)
+  await_host(h)
+
+  # One chunk, and the host is killed while the worker is computing it, so the
+  # submit has nowhere to go. A short reconnect budget keeps the test quick.
+  w <- bg(function(url, phrase, cache, spool) {
+    jobr_join(url, phrase, cache_dir = cache, quiet = TRUE, spool_dir = spool,
+              reconnect_seconds = 5, max_seconds = 60)
+  }, list(url = url, phrase = phrase, cache = tempfile("cache-"), spool = spool))
+  on.exit(kill_quietly(w), add = TRUE)
+
+  wait_until(function() {
+    led <- file.path(work, "ledger.tsv")
+    file.exists(led) && any(grepl("assign", readLines(led, warn = FALSE)))
+  }, timeout = 60, what = "the worker to claim the chunk")
+  kill_quietly(h)
+
+  wait_until(function() !w$is_alive(), timeout = 90, what = "the worker to stop")
+
+  # The host never recorded the chunk, but the results are not lost: they are
+  # on the worker's disk, waiting for somewhere to send them.
+  expect_equal(length(list.files(file.path(work, "results", "test"))), 0L)
+  held <- spool_list(dir = spool)
+  expect_equal(nrow(held), 1L)
+  expect_equal(held$chunk, 1L)
+})
+
+test_that("a worker delivers spooled results before claiming new work", {
+  skip_unless_integration()
+  work <- tempfile("host-"); proj <- write_demo_project(tempfile("proj-"))
+  url <- test_url(); phrase <- "foxtrot-golf-hotel-india"
+  spool <- tempfile("spool-")
+
+  h <- start_host(work, proj, n_jobs = 10, chunksize = 5, url = url,
+                  phrase = phrase, max_seconds = 120)
+  on.exit(kill_quietly(h), add = TRUE)
+  await_host(h)
+
+  # Stand in for a previous session that computed chunk 1 and could not hand
+  # it over. serial_expectation() is what the demo project returns.
+  jobset <- "test"
+  spool_write(jobset, 1L,
+              lapply(1:5, function(i) data.frame(x = i, y = i * 2)),
+              dir = spool)
+  expect_equal(nrow(spool_list(dir = spool)), 1L)
+
+  w <- bg(function(url, phrase, cache, spool) {
+    jobr_join(url, phrase, cache_dir = cache, quiet = TRUE, spool_dir = spool,
+              max_seconds = 110)
+  }, list(url = url, phrase = phrase, cache = tempfile("cache-"), spool = spool))
+  on.exit(kill_quietly(w), add = TRUE)
+  wait_until(function() !w$is_alive(), timeout = 120, what = "the worker")
+
+  # Delivered, and dropped from the spool once the host confirmed it.
+  expect_equal(nrow(spool_list(dir = spool)), 0L)
+  expect_equal(collected(work, "test"), serial_expectation(10), ignore_attr = TRUE)
+
+  # Chunk 1 was never computed in this session -- it arrived from the spool --
+  # so the host only ever assigned the other one.
+  assigns <- assigns_per_chunk(work, "test", 2)
+  expect_equal(assigns[[1]], 0L)
+  expect_equal(assigns[[2]], 1L)
 })
