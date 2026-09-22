@@ -272,6 +272,22 @@ Recorded because they are easy to reintroduce:
 
 ---
 
+## Verified where
+
+Different claims rest on different evidence, and they are not interchangeable.
+
+| Claim | Evidence |
+|---|---|
+| Ledger accounting, leases, chunk boundaries | Unit and property tests over randomly generated event histories |
+| The whole request handler | Unit tests, no sockets involved |
+| Multi-process, real sockets, deterministic faults | Integration tests on one machine |
+| Multi-machine, multi-R-version, real network | `docker/` testbed: 3 R versions, 4 containers, 60 jobs, exactly once |
+| R 3.6 floor | nanonext 1.10.2 compiled from source under R 3.6.3 in a container, with a real socket round-trip |
+| Two physical machines over a LAN | One manual run, Windows to Windows |
+| Load-proportional distribution | **Not demonstrated.** Containers on one host all run at the same speed |
+| Intermittency: dropped links, latency, partitions | **Not demonstrated.** Needs `tc netem`; currently tested by hoping |
+| Windows R 3.6 | **Not demonstrated.** CRAN ships no binary; needs Rtools 3.5 |
+
 ## Open, in rough priority order
 
 1. **A heartbeat that survives a long single job.** The current one renews

@@ -7,11 +7,11 @@
 ARG R_VERSION=4.4.1
 FROM rocker/r-ver:${R_VERSION}
 
-# nanonext bundles NNG and mbedTLS and needs compiling. rocker images carry a
-# toolchain already; libssl is needed by some dependency chains.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends libssl-dev procps \
- && rm -rf /var/lib/apt/lists/*
+# Deliberately no apt step. nanonext bundles NNG and mbedTLS, and digest, zip
+# and mirai need no system libraries, so the toolchain rocker already carries is
+# enough. Installing anything would also break the oldest image outright:
+# rocker/r-ver:3.6.3 is built on Debian buster, which is end-of-life and has
+# moved to archive.debian.org, so `apt-get update` returns 404 there.
 
 # Dependencies first, so editing the package does not invalidate this layer.
 # mirai is Suggested and only needed for cores > 1, but the testbed exercises
@@ -28,8 +28,11 @@ COPY man/ man/
 COPY data/ data/
 COPY inst/ inst/
 
+# getRversion() returns an R_system_version, which cat() cannot print -- it is
+# list-backed. as.character() on both, or this smoke test fails the build while
+# the install it is checking has actually succeeded.
 RUN R CMD INSTALL --no-multiarch . \
  && Rscript -e 'library(jobR); cat("jobR", as.character(packageVersion("jobR")), \
-      "on R", getRversion(), "\n")'
+      "on R", as.character(getRversion()), "\n")'
 
 COPY docker/host.R docker/worker.R docker/assertions.R docker/

@@ -51,6 +51,42 @@ Environment variables on the `host` service: `JOBR_JOBS`, `JOBR_CHUNKSIZE`,
 To change the version matrix, edit the `R_VERSION` build arg per service. Any
 `rocker/r-ver` tag works; the floor is 3.6.
 
+## What a single-machine run does and does not prove
+
+All four containers share one host's CPUs, so every worker runs at the same
+speed and the split comes out even by construction:
+
+```
+          host jobs cpu_seconds share
+1 728e4b679d2f   20         8.2 0.333
+2 ba4ae2e4a5b1   20         8.0 0.333
+3 fc2511c593bf   20         8.0 0.333
+```
+
+That demonstrates correctness -- every job done exactly once, across three
+machines and three R versions -- but **not** load-proportional distribution.
+A faster machine taking more chunks is real behaviour, and it needs genuinely
+unequal machines to show. The two-laptop run in `HOME-TEST.md` is what
+demonstrates that.
+
+## Notes from getting this working
+
+Two things cost a build each, and both are recorded so they are not
+rediscovered:
+
+**No apt step, deliberately.** An earlier version installed `libssl-dev` and
+`procps`. Neither is needed -- nanonext bundles NNG and mbedTLS, and digest,
+zip and mirai need no system libraries -- and the layer broke the oldest image
+outright, because `rocker/r-ver:3.6.3` sits on Debian buster, which is
+end-of-life and has moved to `archive.debian.org`, so `apt-get update` returns
+404 there.
+
+**R 3.6 is verified, not merely declared.** With the apt layer gone, nanonext
+1.10.2 compiles from source under R 3.6.3 and completes a real socket
+round-trip. The package floor is evidence-based. Note this says nothing about
+*Windows* R 3.6, where the obstacle is CRAN not shipping a binary and Rtools
+3.5 being required -- see `HOME-TEST.md`.
+
 ## Worth adding next
 
 **Network impairment.** Give a worker `cap_add: [NET_ADMIN]` and shape its link
