@@ -342,7 +342,7 @@ host_results <- function(state) {
 #'
 #' Provides encryption and lets a worker confirm it is talking to the host it
 #' expects. It does *not* authenticate the worker -- that is what the
-#' passphrase is for. See `vignette("security")` for why.
+#' passphrase is for. See [security] for why.
 #'
 #' @param cn Common name; the address workers will dial.
 #'

@@ -15,5 +15,5 @@ A list of \code{server} (for \code{\link[=jobr_serve]{jobr_serve()}}) and \code{
 \description{
 Provides encryption and lets a worker confirm it is talking to the host it
 expects. It does \emph{not} authenticate the worker -- that is what the
-passphrase is for. See \code{vignette("security")} for why.
+passphrase is for. See \link{security} for why.
 }
