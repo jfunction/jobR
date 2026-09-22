@@ -16,8 +16,7 @@ exchange for a valid passphrase, held only for the life of a session, and
 revocable without disturbing anybody else.
 
 All entropy is drawn locally via nanonext's CSPRNG. Nothing here contacts a
-network service -- an earlier version of this package fetched entropy from
-random.org, which meant a host could not generate its own credential without
-working internet. That is precisely backwards for the deployments this
-package targets.
+network service: drawing credentials from a remote source such as random.org
+would mean a host could not generate its own without working internet, which
+is precisely backwards for the deployments this package targets.
 }

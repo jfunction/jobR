@@ -423,12 +423,12 @@ test_that("a worker installs a missing package from the host, not CRAN", {
     error = function(e) FALSE, warning = function(w) FALSE)
   skip_if_not(isTRUE(reachable), "no CRAN access to stock the host")
 
-  # Choose a package this machine does NOT already have. Hard-coding one is how
-  # the first version of this test fooled itself: praise turned out to be
-  # installed, so the worker never needed the host and the test passed for the
-  # wrong reason. All candidates are tiny and dependency-free.
-  # Ordered obscure-first, so a well-stocked development machine still finds
-  # one free. A fresh CI runner will take the first.
+  # Choose a package this machine does NOT already have. Hard-coding one makes
+  # the test worthless on any machine that happens to have it: the worker never
+  # needs the host, and the test passes for the wrong reason. All candidates are
+  # tiny and dependency-free, ordered obscure-first so that a well-stocked
+  # development machine still finds one free. A fresh CI runner takes the
+  # first.
   candidates <- c("fortunes", "zeallot", "whisker", "praise", "brew", "bitops",
                   "ini", "prettyunits", "rprojroot", "crayon", "R6")
   have <- rownames(utils::installed.packages())
@@ -483,9 +483,9 @@ test_that("a worker installs a missing package from the host, not CRAN", {
 })
 
 # ---- a link that is not there yet, or not there any more ---------------------
-# A worker used to treat the first unanswered request as proof the host had
-# gone, and stop for good. On the intermittent links this package is built for
-# that is the difference between donating a laptop and babysitting a session.
+# Treating the first unanswered request as proof the host has gone costs the
+# machine: on the intermittent links this package is built for, it is the
+# difference between donating a laptop and babysitting a session.
 #
 # The mid-run case -- a link that dies while the worker is holding a chunk --
 # needs real network impairment and lives in docker/docker-compose.partition.yml,

@@ -82,24 +82,24 @@ jobr_join <- function(url, passphrase,
     reply
   }
 
-  # A timed-out exchange leaves a request outstanding in the req socket's
-  # state machine, and the TCP connection under it may be half dead -- a
-  # partition does not close a socket, it just stops delivering. Starting a
-  # fresh one is cheap and leaves nothing to reason about.
+  # A timed-out exchange leaves a request outstanding in the req socket's state
+  # machine, and the connection under it may be half dead: a partition does not
+  # close a socket, it just stops delivering. A fresh socket is cheap and
+  # leaves no state to reason about.
   redial <- function() {
     tryCatch(close(sock), error = function(e) NULL)
     sock <<- nanonext::socket("req", dial = url, tls = tls)
   }
 
-  # Silence used to mean "the host has gone, stop". That was wrong in a way
-  # that cost real work: a laptop on an intermittent link would drop out on
-  # the first missed reply and never come back. Measured in the testbed, a
-  # 25-second blackout removed a worker 15 seconds before its link recovered,
-  # discarding the finished chunk it was holding on the way out.
+  # Silence does not mean the host has gone. On an intermittent link it far
+  # more often means a moment's outage, and a worker that stops at the first
+  # missed reply loses the machine along with whatever chunk it was holding.
   #
-  # Now the host stays up after the last chunk and tells every worker the
-  # jobset is done (see linger_seconds in jobr_serve), so silence really does
-  # mean the link. Keep trying, with backoff, for a bounded budget.
+  # Retrying is only sound because the host no longer goes silent for the one
+  # innocent reason it used to: it stays up after the last chunk and tells
+  # every worker the jobset is done (see linger_seconds in jobr_serve). With
+  # that settled, silence means the link, so keep trying with backoff for a
+  # bounded budget.
   #
   # `retry = FALSE` is for calls that must not block the work they protect:
   # the lease heartbeat, and handing a chunk back after a failure. Both are
@@ -310,10 +310,10 @@ jobr_join <- function(url, passphrase,
     done <- done + 1L
 
     # The submit reply already says whether that was the last chunk, and the
-    # host stops once every worker has been told. Looping round to ask for
-    # more would therefore be answered by silence -- from a host that shut
-    # down for the best of reasons -- and the worker would spend its whole
-    # reconnect budget discovering that the run had ended well.
+    # host stops once every worker has been told. Looping round to ask for more
+    # would be answered by silence from a host that shut down for the best of
+    # reasons, and the worker would spend its whole reconnect budget
+    # establishing that the run had ended well.
     if (isTRUE(sub$done)) { told_done <- TRUE; break }
   }
 
@@ -445,9 +445,9 @@ run_chunk <- function(project_dir, entrypoint, jobs, cores = 1L,
   if (!use_daemons()) {
     # No daemon, so the jobs run here and this process is blocked inside
     # run_job() for as long as they take. Between jobs is then the only moment
-    # it can talk to the host, and a single job longer than the lease is out of
-    # reach -- which is the limitation daemons exist to remove. [jobr_join()]
-    # says so once, at join time, rather than once per chunk.
+    # it can talk to the host, which puts a single job longer than the lease
+    # out of reach -- the limitation daemons exist to remove. [jobr_join()]
+    # states this once, at join time, rather than once per chunk.
     runner <- load_entrypoint_cached(project_dir, entrypoint)
     return(lapply(seq_len(n), function(i) {
       out <- runner(jobs[i, , drop = FALSE])

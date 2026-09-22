@@ -30,8 +30,9 @@ jobr_serve(
 done, so that workers can learn the jobset finished instead of inferring
 it from silence. The host stops as soon as every enrolled worker has been
 told, so a normal run does not wait this out; it is a cap for workers
-that are not coming back. Setting it to 0 restores the old behaviour of
-shutting down the instant the work is complete.}
+that are not coming back. Set it to 0 to shut down the instant the work is
+complete, at the cost of leaving any remaining worker to infer that from
+silence.}
 
 \item{ready_file}{Optional path written once the socket is actually bound,
 and removed on exit. Supervisors and tests need an observable readiness

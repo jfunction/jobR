@@ -21,10 +21,12 @@ From the repo directory:
 
 ```bash
 R CMD build .
-R CMD INSTALL jobR_0.2.0.tar.gz
+R CMD INSTALL jobR_*.tar.gz
 ```
 
-Keep `jobR_0.2.0.tar.gz` — you will copy it to laptop B in step 3.
+`R CMD build` prints the name of the tarball it wrote. Keep it — you will copy
+it to laptop B in step 3. The commands below call it `jobR.tar.gz`; substitute
+whatever `R CMD build` actually produced.
 
 If the install fails with `Permission denied` on a file R just created, that is
 antivirus, not the package, and it is intermittent — see
@@ -112,10 +114,9 @@ often have a few versions lying around, and one may already be new enough:
 list.files("C:/Program Files/R")
 ```
 
-This is the path of least resistance, and it is what worked on the machine this
-guide was tested against — it turned out to have R 3.6.3 **and** R 4.0.5 with
-Rtools40 already installed. Switching to the 4.0.5 was enough: no download, no
-admin rights, no compiler wrangling.
+This is the path of least resistance, and it is often enough on its own. A
+machine carrying R 3.6.3 alongside R 4.0.5 and Rtools40 needs nothing more than
+a switch to the newer one: no download, no admin rights, no compiler wrangling.
 
 Rtools has to match the R you use (Rtools40 goes with R 4.0–4.1, Rtools 3.5
 with R 3.6), which is a further reason to prefer an R that already has a working
@@ -165,11 +166,11 @@ Suggested rather than required so that a minimal machine can still contribute.
 Without it, `jobr_join(cores = 4)` tells you so at join time and runs one job
 at a time instead.
 
-Copy `jobR_0.2.0.tar.gz` across — USB stick, shared folder, `scp`, whatever is
-easiest — then:
+Copy the tarball across — USB stick, shared folder, `scp`, whatever is easiest
+— then:
 
 ```r
-install.packages("~/Downloads/jobR_0.2.0.tar.gz", repos = NULL, type = "source")
+install.packages("~/Downloads/jobR.tar.gz", repos = NULL, type = "source")
 ```
 
 Laptop B needs jobR itself, and any packages your *project* uses. It does not
@@ -196,7 +197,7 @@ run three times in a row will typically succeed, fail, then succeed.
 ```r
 # Retry a few times; each attempt is independent of the last.
 for (i in 1:5) {
-  try(install.packages("jobR_0.2.0.tar.gz", repos = NULL, type = "source"),
+  try(install.packages("jobR.tar.gz", repos = NULL, type = "source"),
       silent = TRUE)
   if (nzchar(system.file(package = "jobR"))) break
   Sys.sleep(2)

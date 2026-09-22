@@ -49,8 +49,8 @@ host_new <- function(project_dir, jobs, chunksize = 25,
   state$tokens        <- character()
   state$workers       <- character()
   # Workers that have been told, in a reply they actually received, that the
-  # jobset is finished. Without this the host cannot tell "everyone knows we
-  # are done" from "nobody is listening", and it used to assume the second.
+  # jobset is finished. Without it the host cannot distinguish "everyone knows
+  # we are done" from "nobody is listening".
   state$farewelled    <- character()
   state$lease_seconds <- lease_seconds
   state$work_dir      <- work_dir
@@ -186,11 +186,11 @@ handle_request <- function(state, req, now = unix_time()) {
       list(ok = TRUE)
     },
 
-    # "I am leaving, do not wait for me." A worker stops for reasons the host
-    # cannot see -- it hit max_chunks, or its own deadline -- and without
-    # being told, the host would hold the door open for it at the end of the
-    # jobset for no reason. Best-effort: a worker that dies without saying
-    # this is exactly the case linger_seconds caps.
+    # "Leaving, do not wait for me." A worker stops for reasons the host cannot
+    # see -- it reached max_chunks, or its own deadline -- and unless it says
+    # so the host holds the door open for it at the end of the jobset for no
+    # reason. Best effort: a worker that dies without sending this is the case
+    # linger_seconds caps.
     bye = {
       state$farewelled <- union(state$farewelled, worker)
       list(ok = TRUE)
@@ -237,8 +237,9 @@ handle_request <- function(state, req, now = unix_time()) {
 #'   done, so that workers can learn the jobset finished instead of inferring
 #'   it from silence. The host stops as soon as every enrolled worker has been
 #'   told, so a normal run does not wait this out; it is a cap for workers
-#'   that are not coming back. Setting it to 0 restores the old behaviour of
-#'   shutting down the instant the work is complete.
+#'   that are not coming back. Set it to 0 to shut down the instant the work is
+#'   complete, at the cost of leaving any remaining worker to infer that from
+#'   silence.
 #' @param ready_file Optional path written once the socket is actually bound,
 #'   and removed on exit. Supervisors and tests need an observable readiness
 #'   signal: dialling cannot provide one, because nanonext connects
@@ -297,15 +298,16 @@ jobr_serve <- function(state, url, tls = NULL, timeout_ms = 1000,
     }
 
     if (jobset_complete(state$ledger, state$jobset, state$n_chunks)) {
-      # Stopping here is what the host used to do, and it made every normal
-      # shutdown indistinguishable from a broken link: the last worker to ask
-      # for work got silence, and silence is also what a dead network looks
-      # like. A worker cannot retry its way out of an ambiguity like that, so
-      # it either gave up too early on a blip or hung on after a finished run.
+      # Stopping the moment the work is done would make a normal shutdown
+      # indistinguishable from a broken link: the last worker to ask for work
+      # gets silence, and silence is also what a dead network looks like. A
+      # worker cannot retry its way out of an ambiguity like that -- it can
+      # only choose between giving up too early on a blip and hanging on after
+      # a finished run.
       #
       # Stay up instead, until every worker that enrolled has been told in a
-      # reply it actually received. Then silence means the link, and the
-      # worker is entitled to keep trying.
+      # reply it actually received. Silence then means the link, and a worker
+      # is entitled to keep trying.
       if (is.null(finished_at)) {
         finished_at <- unix_time()
         if (!quiet && length(awaiting())) {

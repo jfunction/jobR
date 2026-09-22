@@ -27,8 +27,9 @@ the whole harness. First run builds three images and takes a while; afterwards
 the dependency layer is cached.
 
 `run.sh` rather than `up --exit-code-from host`, for a reason worth knowing
-before you reach for the shorter command: see
-[`--exit-code-from host` had to go](#--exit-code-from-host-had-to-go) below.
+before reaching for the shorter command: see
+[Why `run.sh` rather than `docker compose up`](#why-runsh-rather-than-docker-compose-up)
+below.
 
 Tear down with `docker compose -f docker/docker-compose.yml down -v`.
 
@@ -58,49 +59,36 @@ To change the version matrix, edit the `R_VERSION` build arg per service. Any
 ## What a single-machine run does and does not prove
 
 All four containers share one host's CPUs, so every worker runs at the same
-speed. How the work divides is therefore an artefact of timing, not of
-capability:
+speed. How the work divides between them is therefore an artefact of timing
+rather than of capability, and the shares move from run to run: the host waits
+at the end to tell each worker the jobset is over, so the workers stop at
+slightly different moments. An even three-way split looks more impressive and
+means no more than a lopsided one.
 
-```
-          host jobs cpu_seconds share
-1 4ad21b75858e   25        10.0 0.417
-2 e9f902b64f47   20         8.0 0.333
-3 fdd2ce06cb6e   15         6.2 0.250
-```
+What either shape demonstrates is correctness: every job done exactly once,
+across three machines and three R versions. Neither demonstrates
+load-proportional distribution. A faster machine taking more chunks is real
+behaviour, but showing it needs genuinely unequal machines -- the two-laptop
+run in `HOME-TEST.md` is what does that.
 
-Earlier runs split it evenly three ways, which looked more impressive and
-meant no more: the host used to stop the instant the last chunk landed, so
-every worker was cut off at the same moment. It now waits to say goodbye, the
-workers stop at slightly different times, and the shares move. Both shapes
-demonstrate correctness -- every job done exactly once, across three machines
-and three R versions -- and neither demonstrates load-proportional
-distribution.
-A faster machine taking more chunks is real behaviour, and it needs genuinely
-unequal machines to show. The two-laptop run in `HOME-TEST.md` is what
-demonstrates that.
+## Notes on the images
 
-## Notes from getting this working
+**No apt step, deliberately.** Nothing here needs one: nanonext bundles NNG and
+mbedTLS, and digest, zip and mirai need no system libraries. Adding one also
+breaks the oldest image outright, because `rocker/r-ver:3.6.3` sits on Debian
+buster, which is end-of-life and has moved to `archive.debian.org`, so
+`apt-get update` returns 404 there.
 
-Two things cost a build each, and both are recorded so they are not
-rediscovered:
-
-**No apt step, deliberately.** An earlier version installed `libssl-dev` and
-`procps`. Neither is needed -- nanonext bundles NNG and mbedTLS, and digest,
-zip and mirai need no system libraries -- and the layer broke the oldest image
-outright, because `rocker/r-ver:3.6.3` sits on Debian buster, which is
-end-of-life and has moved to `archive.debian.org`, so `apt-get update` returns
-404 there.
-
-**R 3.6 is verified, not merely declared.** With the apt layer gone, nanonext
-1.10.2 compiles from source under R 3.6.3 and completes a real socket
-round-trip. The package floor is evidence-based. Note this says nothing about
-*Windows* R 3.6, where the obstacle is CRAN not shipping a binary and Rtools
+**R 3.6 is verified, not merely declared.** nanonext 1.10.2 compiles from
+source under R 3.6.3 and completes a real socket round-trip, so the package
+floor rests on evidence rather than on a `Depends` field. This says nothing
+about *Windows* R 3.6, where the obstacle is CRAN shipping no binary and Rtools
 3.5 being required -- see `HOME-TEST.md`.
 
 ## Network impairment
 
-Intermittency is the condition this package exists for, and it used to be
-tested by hoping. It is now shaped with `tc netem` and asserted.
+Intermittency is the condition this package exists for, so it is shaped with
+`tc netem` and asserted rather than assumed.
 
 ```bash
 docker/run.sh docker/docker-compose.netem.yml
@@ -109,137 +97,109 @@ docker/run.sh docker/docker-compose.netem.yml
 Two workers on the same jobset: `worker-steady` on a clean link, and
 `worker-flaky` behind 150ms +/- 50ms of delay and 5% packet loss. The host is
 told to expect **two** distinct machines in the results, and that is the whole
-assertion. If the impaired worker cannot finish its handshake, or quits the
-first time something is dropped, the jobset still completes -- the steady
-worker would do all of it -- but only one machine appears and the run fails.
-The test is about surviving the link, not about finishing.
+assertion. A worker that cannot finish its handshake, or that quits the first
+time something is dropped, leaves the jobset to be completed by the steady
+worker alone -- at which point only one machine appears and the run fails. The
+test is about surviving the link, not about finishing.
+
+For a worker whose link disappears entirely, overlay
+`docker-compose.partition.yml`.
 
 ### How the impairment is applied
 
-A sidecar container (`docker/Dockerfile.netem`, `docker/netem.sh`) shares the
-worker's network namespace via `network_mode: "service:worker-flaky"`, holds
-`NET_ADMIN`, and attaches the qdisc from outside. That is deliberate: the R
-images must stay free of an apt layer, because `rocker/r-ver:3.6.3` sits on
-Debian buster and its archive 404s, so `tc` cannot be installed in the worker
-image at all. Shaping from a sidecar leaves every R image untouched and lets
-any worker be impaired, including the 3.6.3 one.
+A sidecar container (`Dockerfile.netem`, `netem.sh`) shares the worker's
+network namespace via `network_mode: "service:worker-flaky"`, holds
+`NET_ADMIN`, and attaches the qdisc from outside. The R images must stay free
+of an apt layer, so `tc` cannot be installed in them at all; shaping from a
+sidecar leaves every R image untouched and lets any worker be impaired,
+including the 3.6.3 one.
+
+netem shapes **egress only**, so a request/reply exchange sees the delay and
+the loss once rather than twice.
 
 Knobs, all on the `netem` service: `NETEM_DELAY`, `NETEM_JITTER`, `NETEM_LOSS`,
 `NETEM_RATE`, `NETEM_PARTITION_AT`, `NETEM_PARTITION_FOR`.
 
-### The worker will not join a link it cannot confirm is bad
+### The worker gates itself on a measurably bad link
 
-Compose cannot express "start after the qdisc exists", so the worker gates
-itself on `JOBR_REQUIRE_RTT_MS`: it pings until a round trip is *observably*
-slow, and only then joins. A sentinel file in a shared volume would have done
-the job until a stale one survived a run, at which point the worker would have
-handshaked over a clean link and the run would still have called itself an
-impaired test. Measuring the link cannot go stale.
+Compose cannot express "start after the qdisc exists", so the worker pings
+until a round trip is observably slow and only then joins
+(`JOBR_REQUIRE_RTT_MS`). A sentinel file in a shared volume would do the same
+job until a stale one survived a run, after which the worker would handshake
+over a clean link while the run still called itself an impaired test.
+Measuring the link cannot go stale.
 
-Observed: the gate opens at a 632ms round trip against a 120ms threshold, and
-a clean link measures ~1ms, so the two are not close.
+The margin is wide: the gate opens at around 600ms against a 120ms threshold,
+and a clean link measures about 1ms.
 
-### `--exit-code-from host` had to go
+### Why `run.sh` rather than `docker compose up`
 
-It implies `--abort-on-container-exit`, which tears the run down the moment
-**any** container stops -- including a worker that has finished its share, or
-one that has dropped out because its link died, which is the exact event this
-scenario exists to observe. It aborted a run at 26 of 40 chunks and reported
-success, because the host never reached its assertions.
+`--exit-code-from host` implies `--abort-on-container-exit`, which tears the
+run down as soon as **any** container stops. That is fatal to the assertions
+here, for three separate reasons:
 
-This bites **every** scenario, not just the impaired ones, and it started
-biting the plain version matrix the moment the host began outliving its
-workers. That run ended:
+- a worker finishes its share and exits while the host is still collecting;
+- a worker drops out because its link died, which is the exact event the
+  impaired scenarios exist to observe;
+- the host deliberately outlives its workers, staying up at the end to tell
+  each one the jobset is over.
 
-```
-jobr-testbed-host-1   |   all chunks done; staying up so workers can finish cleanly
-jobr-testbed-worker-current-1 exited with code 0
-Aborting on container exit...
-```
+In each case compose kills the host before it reaches a single assertion and
+reports success anyway. A run that checks nothing and exits 0 is worse than
+one that fails, so `run.sh` starts the stack detached, streams the logs, and
+blocks on `docker compose wait host`. The host is the only judge.
 
-No `== OK ==`, no assertions, exit code 0. A green run that checked nothing is
-worse than a red one.
+`run.sh` also tears the stack down *before* starting, not after. A stopped
+container keeps its filesystem, so `up -d` would restart the previous run's
+host with the previous run's ledger still in `/tmp/jobr-host`. That ledger is
+append-only and replayed on open -- correct behaviour, and the reason a
+restarted host does not lose a jobset -- so the new host resumes where the old
+one stopped and counts its chunks as done. The result is indistinguishable
+from a clean pass. Not tearing down afterwards is equally deliberate: a failed
+run is the one worth inspecting, and its ledger and logs explain it.
 
-`docker/run.sh` starts the stack detached, streams the logs, and blocks on
-`docker compose wait host`, so workers coming and going no longer decide the
-result. The host is the only judge.
+### Exit paths
 
-### `run.sh` tears everything down before it starts, on purpose
+Both directions are exercised, because a harness that can only report success
+is not a harness. Against code without the reconnect logic the blackout
+scenario returns 1; against the current code it returns 0. The bad-link
+scenario returns 0 either way, which is why the blackout scenario exists
+separately.
 
-A stopped container keeps its filesystem. `docker compose up -d` will restart
-the previous run's host with the previous run's ledger still sitting in
-`/tmp/jobr-host`, and because that ledger is append-only and replayed on open
--- correct behaviour, and the reason a restarted host does not lose a jobset
--- the new host resumes where the old one stopped and counts its chunks as
-done.
-
-It reads as a clean pass. It caught this testbed once: a run reported `all 40
-chunks done` while its two workers had between them processed ten. So `run.sh`
-does `down -v` first and recreates every container.
-
-### Verified exit paths
-
-Both directions of the harness were checked, because a test harness that can
-only report success is not a harness. The blackout scenario returned 1 against
-the code as it was, and 0 against the fix:
-
-```
-                                              before the fix   after
-docker/run.sh .../netem.yml                              0        0
-docker/run.sh .../netem.yml .../partition.yml            1        0
-```
-
-That one column is the whole argument for building the impairment before
-building the fix.
-
-### What the impaired run showed
+### What the impairment demonstrates
 
 **Loss over TCP is not message loss.** 5% netem loss on a TCP transport is
-absorbed by retransmission: the worker sees latency, not dropped requests. It
-carried its share with no protocol-level failure at all -- 19 of 40 chunks in
-one run and 18 in another, against the steady worker's 21 and 22 -- so the
-only cost of the bad link was the round trip. What actually reaches the
-application from a bad link is *delay* and *connection loss*, so those are the
-knobs that test anything. This is worth knowing before tuning `NETEM_LOSS`
-upward and believing it proves something.
+absorbed by retransmission: the application sees latency, not dropped requests.
+The impaired worker carries very nearly its full share, with no protocol-level
+failure at all, so the only real cost of the bad link is the round trip. What
+reaches the application from a bad link is *delay* and *connection loss*, and
+those are the knobs that test anything. Worth knowing before turning
+`NETEM_LOSS` up and believing the result proves something.
 
-**A 25-second blackout used to remove a worker permanently.** This is what
-the impairment was built to find, and it found it on the first run:
+**A total blackout is survivable, and the partition scenario is what proves
+it.** Without a bounded reconnect on the worker side, a single timed-out
+request ends that worker's participation permanently, and because the request
+is usually a `submit`, a finished chunk is discarded with it. The fleet stays
+correct -- the lease lapses, the chunk is reissued, every job lands exactly
+once -- but the machine is lost roughly ten seconds into the outage and never
+returns, even though the link comes back fifteen seconds later.
 
-```
-07:37:44.5  link goes dark
-07:37:53.9  "host vanished before chunk 22 was accepted" -- worker exits
-07:38:09.5  link comes back, 15.6 seconds too late for anyone to notice
-
-== FAILED ==
-  - jobs not covered exactly once: 145 rows, 145 distinct ids, expected 200
-  - 11 of 40 chunks are not done
-```
-
-One timed-out request ended the worker's participation for good, and because
-that request was a `submit`, a finished chunk went with it. The fleet stayed
-correct -- lease lapses, chunk reissued, every job exactly once -- but the
-machine was gone. Reproduced twice, to the second.
-
-`docker-compose.partition.yml` asserted the opposite, so it failed. It now
-passes:
+The scenario asserts the opposite, with the healthy worker capped at 20 of the
+40 chunks so the remainder can only come from the worker that went dark:
 
 ```
 == netem: partition starts ==
   lost contact with the host (no reply: 5 | Timed out); retrying for up to 60s
-worker done: 20 chunks                 <- the steady worker hits its cap
+worker done: 20 chunks                 <- the steady worker reaches its cap
 == netem: partition ends ==
   back in touch with the host          <- and picks up chunk 32
 == OK == all 200 jobs, all 40 chunks done
 ```
 
-The impaired worker did 20 of the 40 chunks, 11 of them after coming back. The
-steady worker is capped at 20, and had already stopped, so nothing else could
-have done them. What changed is described in `DESIGN.md`; in short, the worker
-retries a silent host instead of concluding it has gone, and the host stops
-being silent for the one reason that used to be indistinguishable from a dead
-link -- it now stays up after the last chunk and tells every worker the jobset
-is over.
+`DESIGN.md` describes the mechanism. In short: the worker retries a silent
+host instead of concluding it has gone, and the host stops being silent for
+the one reason that was previously indistinguishable from a dead link, by
+staying up after the last chunk to tell every worker the jobset is over.
 
 ## Worth adding next
 
@@ -247,6 +207,6 @@ is over.
 "machine died" than killing a process, and should leave the run completing via
 lease expiry and reissue.
 
-**Symmetric impairment.** netem shapes egress only, so a request/reply exchange
-sees the delay and loss once rather than twice. Making it symmetric needs `ifb`
-ingress redirection, which is a kernel module the testbed would then depend on.
+**Symmetric impairment.** netem shapes egress only. Making it symmetric needs
+`ifb` ingress redirection, which is a kernel module the testbed would then
+depend on.

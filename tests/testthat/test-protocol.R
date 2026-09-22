@@ -432,12 +432,12 @@ test_that("a missing or malformed path is refused rather than erroring", {
 })
 
 # ---- knowing when everyone has been told ------------------------------------
-# The host used to shut down the instant the last chunk landed, which made a
-# normal ending indistinguishable from a dead link: the last worker to ask for
-# work got silence, and silence is also what a partition looks like. A worker
-# cannot retry its way out of that ambiguity. So the host now tracks which
-# workers have actually been told, in a reply they received, that the work is
-# finished -- and only those workers.
+# A host that shuts down the instant the last chunk lands makes a normal ending
+# indistinguishable from a dead link: the last worker to ask for work gets
+# silence, and silence is also what a partition looks like. A worker cannot
+# retry its way out of that ambiguity. The host therefore tracks which workers
+# have been told, in a reply they received, that the work is finished -- and
+# only those workers.
 
 test_that("nobody is farewelled while there is still work", {
   h <- demo_host(n = 10, chunksize = 5)

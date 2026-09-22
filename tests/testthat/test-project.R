@@ -237,9 +237,9 @@ test_that("a multi-file project works across cores", {
   skip_if_not(dir.exists(dir))
   jobs <- data.frame(id = 1:4, seconds = 0.05)
 
-  # The entrypoint calls burn(), defined in a sibling file. A closure shipped
-  # to a daemon loses its enclosing environment, so this is exactly the case
-  # that used to fail.
+  # The entrypoint calls burn(), defined in a sibling file. A closure shipped to
+  # a daemon loses its enclosing environment, so a multi-file project is the
+  # case that breaks if the daemon does not source the project itself.
   out <- run_chunk(dir, "R/run.R", jobs, cores = 2)
   expect_length(out, 4L)
   expect_true(all(vapply(out, is.data.frame, logical(1))))
@@ -308,11 +308,11 @@ test_that("a report skips the odd bad result but still reports", {
 
 
 # ---- the heartbeat during a single long job ---------------------------------
-# The heartbeat used to fire only between jobs, so a chunk of many short jobs
-# kept its lease and a chunk containing one long job did not. That is backwards:
-# the long job is the one that needs the lease held. A worker is single-
-# threaded, so the only way out is for the job to run somewhere else -- which
-# is why jobs go to a daemon even on one core.
+# Renewing only between jobs holds the lease for a chunk of many short jobs and
+# not for a chunk containing one long one -- which is backwards, since the long
+# job is the one that needs it. A worker is single-threaded, so the only way to
+# renew mid-job is for the job to run somewhere else, which is why jobs go to a
+# daemon even on one core.
 
 slow_job_project <- function(dir, seconds) {
   dir.create(file.path(dir, "R"), recursive = TRUE, showWarnings = FALSE)
@@ -346,9 +346,9 @@ test_that("in-process execution cannot beat during a job, and says so", {
   skip_on_cran()
   d <- slow_job_project(tempfile("proj-"), seconds = 2)
 
-  # The fallback for a machine with no mirai, or one too short of memory to
-  # want a second R process. It is the old behaviour, and this pins the cost of
-  # it so that nobody mistakes the two paths for equivalent.
+  # The fallback for a machine with no mirai, or one too short of memory for a
+  # second R process. This pins its cost, so that the two paths are not mistaken
+  # for equivalent.
   withr::with_options(list(jobR.in_process = TRUE), {
     expect_false(use_daemons())
     beats <- 0L
@@ -383,11 +383,11 @@ test_that("results are the same whether a job runs here or in a daemon", {
   skip_if_not(dir.exists(dir))
   jobs <- data.frame(id = 1:4, n = 2000, seed = 1:4)
 
-  # Compares against running the project by hand, which is what a user would
+  # Compared against running the project by hand, which is what a user would
   # get and therefore the actual contract. Comparing run_chunk(cores = 1)
-  # against run_chunk(cores = 2) no longer tests anything, now that both go
-  # through a daemon -- and that comparison is what caught the RNG divergence
-  # in the first place, so it needs a replacement rather than a deletion.
+  # against run_chunk(cores = 2) would test nothing, since both go through a
+  # daemon; the property worth pinning is that a daemon's answer matches an
+  # ordinary in-process one, which is where RNG divergence would show up.
   runner <- load_entrypoint(dir, "R/run.R")
   by_hand <- do.call(rbind, lapply(seq_len(nrow(jobs)),
                                    function(i) runner(jobs[i, , drop = FALSE])))

@@ -1,39 +1,31 @@
-# Overlay: the machine goes dark mid-run.
+# Overlay: a worker whose link goes dark mid-run.
 #
 #   docker/run.sh docker/docker-compose.netem.yml docker/docker-compose.partition.yml
 #
 # The impaired worker's link drops to 100% loss 30 seconds in and stays dark
 # for 25 -- longer than the 15-second lease, so whatever chunk it was holding
-# lapses and is reissued to someone else while it is gone. Then the link comes
-# back, and the worker has to still be there.
+# lapses and is reissued while it is gone. Then the link returns, and the
+# worker has to still be there.
 #
 # Why the steady worker is capped. Without a cap this scenario passes while
-# demonstrating nothing: the healthy worker quietly finishes the jobset alone,
-# every assertion holds, and the impaired worker's disappearance never shows
-# up. Capping it at 20 of the 40 chunks means the remaining 20 can ONLY be
-# done by the impaired worker, so "all 40 chunks done" is true if and only if
-# that worker came back. The existing assertions then carry the weight; no new
+# demonstrating nothing: the healthy worker finishes the jobset alone, every
+# assertion holds, and the impaired worker's disappearance never shows up.
+# Capping it at 20 of the 40 chunks means the remaining 20 can only be done by
+# the impaired worker, so "all 40 chunks done" is true if and only if that
+# worker came back. The existing assertions then carry the weight, and no new
 # assertion machinery is needed.
 #
-# This file was written to fail. It did, for one commit, and that failure is
-# what the fix was built against:
+# A passing run reads:
 #
-#   partition starts
-#   host vanished before chunk 22 was accepted   <- worker exits, 9 chunks in
-#   partition ends, 15.6 seconds too late for anyone to notice
-#   == FAILED == 145 of 200 jobs, 11 of 40 chunks not done
-#
-# What happens now:
-#
-#   partition starts
-#   lost contact with the host (no reply: 5 | Timed out); retrying for up to 60s
-#   worker done: 20 chunks                       <- the steady worker hits its cap
-#   partition ends
-#   back in touch with the host                  <- and picks up chunk 32
+#   == netem: partition starts ==
+#     lost contact with the host (no reply: 5 | Timed out); retrying for up to 60s
+#   worker done: 20 chunks                 <- the steady worker reaches its cap
+#   == netem: partition ends ==
+#     back in touch with the host          <- and picks up chunk 32
 #   == OK == all 200 jobs, all 40 chunks done
 #
-# The impaired worker did 20 of the 40 chunks, 11 of them after coming back
-# from a blackout that used to be fatal. The other worker had already stopped,
+# The impaired worker does 20 of the 40 chunks, roughly half of them after
+# returning from the blackout. The other worker has already stopped by then,
 # so nothing else could have done them.
 
 services:

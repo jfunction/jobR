@@ -8,7 +8,7 @@
 # container keeps every R image untouched and lets any worker be impaired,
 # including the 3.6.3 one.
 #
-# Scope, stated honestly: netem shapes EGRESS only. The worker's requests are
+# Scope: netem shapes EGRESS only. The worker's requests are
 # delayed and dropped; the host's replies arrive clean. A request/reply
 # exchange therefore sees the full delay once and the full loss once, which is
 # the behaviour that matters here. It is not a symmetric bad link; making it

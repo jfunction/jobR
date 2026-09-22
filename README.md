@@ -185,7 +185,7 @@ tls_config(client = cert$client, server = cert$server, auth = TRUE)
 So a listener can be told to *require* a peer certificate, but there is no way
 to also give it a CA to *validate* that certificate against. Require-but-cannot-
 validate rejects everyone. Measured matrix, identical on nanonext 1.6.1 and
-1.10.2 (current at time of writing):
+1.10.2:
 
 | listener | client | result |
 |---|---|---|
@@ -196,10 +196,10 @@ validate rejects everyone. Measured matrix, identical on nanonext 1.6.1 and
 
 The nanonext changelog has no entry about client-certificate authentication or
 peer verification on listeners, and the configuration vignette shows no example
-of a listener verifying a client. This looks like a capability the API does not
-expose rather than one that regressed, and it is worth raising upstream.
+of a listener verifying a client, so this reads as a capability the API does not
+expose rather than one that regressed.
 
-Until then the passphrase carries that weight.
+The passphrase therefore carries that weight.
 
 The practical consequence: anyone who obtains the passphrase can contribute work
 and read the jobs they are handed. That is fine among colleagues. It is not a
@@ -222,6 +222,10 @@ jobR does not know or care which of these you use. It takes a URL.
 Rscript -e 'testthat::test_dir("tests/testthat")'          # unit tests only
 JOBR_INTEGRATION=1 NOT_CRAN=true Rscript -e 'testthat::test_dir("tests/testthat")'
 ```
+
+There is also a containerised testbed in [`docker/`](docker/README.md): several
+R versions on a real network between separate containers, with `tc netem` for
+latency, packet loss and total blackouts.
 
 Integration tests run a real host and real workers as separate OS processes over
 real sockets. See [`tests/testthat/helper-integration.R`](tests/testthat/helper-integration.R)
