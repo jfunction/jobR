@@ -169,9 +169,18 @@ handle_request <- function(state, req, now = unix_time()) {
       held <- !is.null(k) && !is.na(k) && k >= 1L && k <= state$n_chunks &&
         st$state[k] == "leased" && identical(st$worker[k], worker)
       if (!held) {
-        # Telling the worker it has lost the lease is useful: it now knows its
-        # current chunk will be redone by someone else.
-        list(ok = FALSE, error = "you do not hold that lease")
+        # Why it was lost decides what the worker should do, and only the host
+        # can tell the two apart. If the chunk is finished, carrying on is
+        # certainly wasted effort. If it was merely reassigned, the worker that
+        # holds it now may itself die, so finishing and offering the result is
+        # the better bet.
+        at <- if (!is.null(k) && !is.na(k) && k >= 1L && k <= state$n_chunks) {
+          st$state[k]
+        } else {
+          "unknown"
+        }
+        list(ok = FALSE, error = "you do not hold that lease",
+             reason = if (identical(at, "done")) "done" else "reassigned")
       } else {
         state$ledger <- ledger_append(state$ledger, "renew", state$jobset,
                                       k, worker,
@@ -181,9 +190,38 @@ handle_request <- function(state, req, now = unix_time()) {
     },
 
     fail = {
-      state$ledger <- ledger_append(state$ledger, "fail", state$jobset,
-                                    req$chunk, worker, now = now)
-      list(ok = TRUE)
+      # Guarded exactly as renew is. A worker whose lease lapsed while it was
+      # working would otherwise be able to reopen a chunk that now belongs to
+      # somebody else, taking it out from under a worker that is busy on it.
+      # Refusing is safe in every case this rejects: the chunk is already open,
+      # already done, or already someone else's.
+      st <- chunk_state(state$ledger, state$jobset, state$n_chunks, now)
+      k <- req$chunk
+      held <- !is.null(k) && !is.na(k) && k >= 1L && k <= state$n_chunks &&
+        st$state[k] == "leased" && identical(st$worker[k], worker)
+      if (!held) {
+        list(ok = FALSE, error = "you do not hold that lease")
+      } else {
+        state$ledger <- ledger_append(state$ledger, "fail", state$jobset,
+                                      k, worker, now = now)
+        list(ok = TRUE)
+      }
+    },
+
+    # Which of these results does the host still want? A worker returning with
+    # spooled chunks can be holding a great deal of data, and uploading a
+    # result for a chunk somebody else has already finished costs bandwidth to
+    # achieve nothing. On a metered link that is the whole difference between
+    # the spool being safe and the spool being cheap.
+    offer = {
+      ks <- suppressWarnings(as.integer(req$chunks))
+      ks <- ks[!is.na(ks) & ks >= 1L & ks <= state$n_chunks]
+      if (!length(ks)) {
+        list(ok = TRUE, want = integer())
+      } else {
+        st <- chunk_state(state$ledger, state$jobset, state$n_chunks, now)
+        list(ok = TRUE, want = ks[st$state[ks] != "done"])
+      }
     },
 
     # "Leaving, do not wait for me." A worker stops for reasons the host cannot

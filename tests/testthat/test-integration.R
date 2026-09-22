@@ -750,3 +750,51 @@ test_that("a worker delivers spooled results before claiming new work", {
   expect_equal(assigns[[1]], 0L)
   expect_equal(assigns[[2]], 1L)
 })
+
+
+test_that("a spooled result the host already has is discarded, not uploaded", {
+  skip_unless_integration()
+  work <- tempfile("host-"); proj <- write_demo_project(tempfile("proj-"))
+  url <- test_url(); phrase <- "juliet-kilo-lima-mike"
+  spool <- tempfile("spool-")
+
+  # Three chunks, and the first worker is capped at two of them. The jobset
+  # therefore stays unfinished, which keeps the host up: a host that has
+  # everything shuts down once its workers have been told, and the late worker
+  # would find nobody home.
+  h <- start_host(work, proj, n_jobs = 15, chunksize = 5, url = url,
+                  phrase = phrase, max_seconds = 150)
+  on.exit(kill_quietly(h), add = TRUE)
+  await_host(h)
+
+  # A result from an earlier session for a chunk that somebody else is about to
+  # finish. Deliberately wrong, so that uploading it would be visible.
+  spool_write("test", 1L,
+              lapply(1:5, function(i) data.frame(x = i, y = -999)),
+              dir = spool)
+
+  first <- bg(function(url, phrase, cache, spool) {
+    jobr_join(url, phrase, cache_dir = cache, quiet = TRUE,
+              spool_dir = spool, max_chunks = 2, max_seconds = 140)
+  }, list(url = url, phrase = phrase, cache = tempfile("cache-"),
+          spool = file.path(tempfile("other-"), "spool")))
+  on.exit(kill_quietly(first), add = TRUE)
+  wait_until(function() !first$is_alive(), timeout = 120, what = "the first worker")
+
+  # Chunk 1 is now done, computed properly by somebody else.
+  expect_true(file.exists(file.path(work, "results", "test", "000001.rds")))
+
+  # The holder returns. It should ask, be told chunk 1 is done, throw its copy
+  # away without spending a byte on the upload, and get on with the last chunk.
+  late <- bg(function(url, phrase, cache, spool) {
+    jobr_join(url, phrase, cache_dir = cache, quiet = TRUE, spool_dir = spool,
+              max_seconds = 120)
+  }, list(url = url, phrase = phrase, cache = tempfile("cache-"), spool = spool))
+  on.exit(kill_quietly(late), add = TRUE)
+  wait_until(function() !late$is_alive(), timeout = 130, what = "the late worker")
+
+  expect_equal(nrow(spool_list(dir = spool)), 0L)
+  # The decisive assertion: had the stale copy been uploaded it would have
+  # overwritten chunk 1 with y = -999.
+  expect_equal(collected(work, "test"), serial_expectation(15), ignore_attr = TRUE)
+})

@@ -394,3 +394,59 @@ test_that("results are the same whether a job runs here or in a daemon", {
   expect_equal(by_hand, do.call(rbind, run_chunk(dir, "R/run.R", jobs, cores = 1)))
   expect_equal(by_hand, do.call(rbind, run_chunk(dir, "R/run.R", jobs, cores = 2)))
 })
+
+
+# ---- abandoning a chunk somebody else finished ------------------------------
+# Renewing while a job runs holds the chunk whether or not the work is still
+# wanted. When the host says the chunk is done, every further second is spent
+# on an answer that already exists.
+
+test_that("a chunk is abandoned when the heartbeat says it is done", {
+  skip_if_not_installed("mirai")
+  skip_on_cran()
+  d <- slow_job_project(tempfile("proj-"), seconds = 3)
+
+  # Stands in for a host replying "you do not hold that lease, reason: done".
+  err <- tryCatch(
+    run_chunk(d, "R/run.R", data.frame(x = 1L), cores = 1,
+              heartbeat = function() FALSE, heartbeat_seconds = 0.25),
+    condition = function(e) e)
+
+  expect_s3_class(err, "jobr_abandoned")
+  expect_match(conditionMessage(err), "another worker completed")
+})
+
+test_that("abandoning stops promptly rather than waiting the chunk out", {
+  skip_if_not_installed("mirai")
+  skip_on_cran()
+  # Three jobs of three seconds. Giving up properly means stopping the tasks
+  # already dispatched, not letting them run to the end.
+  d <- slow_job_project(tempfile("proj-"), seconds = 3)
+  t0 <- Sys.time()
+  try(run_chunk(d, "R/run.R", data.frame(x = 1:3), cores = 1,
+                heartbeat = function() FALSE, heartbeat_seconds = 0.25),
+      silent = TRUE)
+  elapsed <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+  expect_lt(elapsed, 9)
+})
+
+test_that("a heartbeat that keeps saying yes does not abandon anything", {
+  skip_if_not_installed("mirai")
+  skip_on_cran()
+  d <- slow_job_project(tempfile("proj-"), seconds = 1)
+  out <- run_chunk(d, "R/run.R", data.frame(x = 1L), cores = 1,
+                   heartbeat = function() TRUE, heartbeat_seconds = 0.25)
+  expect_length(out, 1L)
+})
+
+test_that("in-process execution abandons between jobs too", {
+  skip_on_cran()
+  d <- slow_job_project(tempfile("proj-"), seconds = 0.2)
+  withr::with_options(list(jobR.in_process = TRUE), {
+    err <- tryCatch(
+      run_chunk(d, "R/run.R", data.frame(x = 1:5), cores = 1,
+                heartbeat = function() FALSE, heartbeat_seconds = 0),
+      condition = function(e) e)
+    expect_s3_class(err, "jobr_abandoned")
+  })
+})

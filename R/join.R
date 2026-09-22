@@ -228,6 +228,25 @@ jobr_join <- function(url, passphrase,
     if (is.null(spool_dir)) return(invisible(0L))
     have <- spool_list(hi$jobset, dir = spool_dir)
     if (!nrow(have)) return(invisible(0L))
+    # Ask before sending. A spooled result can be large, and uploading one for
+    # a chunk somebody else has already finished spends bandwidth to achieve
+    # nothing -- which on a metered link is exactly what the spool was supposed
+    # to avoid. A host too old to know the op simply refuses, and everything is
+    # offered as before.
+    asked <- call(list(op = "offer", token = token, chunks = have$chunk),
+                  fatal = FALSE)
+    if (!is.null(asked) && isTRUE(asked$ok)) {
+      unwanted <- setdiff(have$chunk, as.integer(asked$want))
+      if (length(unwanted)) {
+        drop_paths <- have$path[have$chunk %in% unwanted]
+        spool_drop(drop_paths)
+        if (!quiet) message("  ", length(unwanted), " chunk(s) already done ",
+                            "elsewhere; discarded without uploading")
+        have <- have[!(have$chunk %in% unwanted), , drop = FALSE]
+      }
+    }
+    if (!nrow(have)) return(invisible(0L))
+
     if (!quiet) message("delivering ", nrow(have), " chunk(s) held from an ",
                         "earlier session")
     sent <- 0L
@@ -341,19 +360,33 @@ jobr_join <- function(url, passphrase,
       r <- call(list(op = "renew", token = token, chunk = cl$chunk),
                 fatal = FALSE, retry = FALSE,
                 block = min(timeout_ms, 2000))
-      # A refusal means the lease lapsed and the chunk now belongs to someone
-      # else. Finishing it is wasted but harmless -- the submit will be a
-      # duplicate, and completion is terminal -- so say so and carry on.
-      if (!is.null(r) && !isTRUE(r$ok) && !quiet) {
-        message("  lost the lease on chunk ", cl$chunk, ": ", r$error)
+      if (is.null(r) || isTRUE(r$ok)) return(TRUE)
+
+      # The lease is gone, and what to do depends on why. Finished by somebody
+      # else means every remaining second is wasted, so stop. Merely reassigned
+      # means the worker holding it now might die too, and a finished result
+      # can still be offered, so carry on.
+      if (identical(r$reason, "done")) {
+        if (!quiet) message("  chunk ", cl$chunk,
+                            " was finished by another worker; abandoning it")
+        return(FALSE)
       }
-      invisible(NULL)
+      if (!quiet) message("  lost the lease on chunk ", cl$chunk,
+                          "; finishing anyway in case it is still wanted")
+      TRUE
     }
 
     out <- tryCatch(run_chunk(project_dir, hi$entrypoint, cl$jobs, cores = cores,
                               heartbeat = beat, heartbeat_seconds = every,
                               max_chunk_seconds = max_chunk_seconds),
                     error = function(e) e)
+    if (inherits(out, "jobr_abandoned")) {
+      # Not this machine's fault and not its problem: the host has the chunk
+      # recorded as done. Handing it back would be wrong, and counting it
+      # against max_failures would eventually stop a perfectly good worker.
+      if (!quiet) message("  chunk ", cl$chunk, ": ", conditionMessage(out))
+      next
+    }
     if (inherits(out, "error")) {
       # Hand the chunk back rather than submitting a result that is really an
       # error. Someone else, or this worker on a later pass, can retry it.
@@ -498,6 +531,15 @@ daemons_ensure <- function(n) {
   TRUE
 }
 
+# Raised when a chunk is given up because finishing it could not help: another
+# worker has already completed it. Deliberately not an ordinary error. The
+# caller counts errors against max_failures to catch a machine that is broken,
+# and a chunk taken away by the scheduler says nothing about this machine.
+abandoned <- function(msg) {
+  structure(class = c("jobr_abandoned", "error", "condition"),
+            list(message = msg, call = NULL))
+}
+
 #' Run one chunk of jobs
 #'
 #' Takes the project rather than a loaded function, because a `run_job` closure
@@ -515,7 +557,10 @@ daemons_ensure <- function(n) {
 #' @param jobs A data frame of jobs.
 #' @param cores Local cores to spread the chunk across. 1 still uses a daemon.
 #' @param heartbeat Optional zero-argument function called periodically while
-#'   the chunk runs, used by [jobr_join()] to renew its lease.
+#'   the chunk runs, used by [jobr_join()] to renew its lease. Returning
+#'   `FALSE` from it abandons the chunk: the work is known to be pointless, and
+#'   a `jobr_abandoned` condition is raised rather than an error, because
+#'   nothing has gone wrong with this machine.
 #' @param heartbeat_seconds How often, at most, to call `heartbeat`.
 #' @param max_chunk_seconds Stop renewing once a chunk has been running this
 #'   long. Renewing while a job runs makes a hung job indistinguishable from a
@@ -549,11 +594,14 @@ run_chunk <- function(project_dir, entrypoint, jobs, cores = 1L,
     # out of reach -- the limitation daemons exist to remove. [jobr_join()]
     # states this once, at join time, rather than once per chunk.
     runner <- load_entrypoint_cached(project_dir, entrypoint)
-    return(lapply(seq_len(n), function(i) {
-      out <- runner(jobs[i, , drop = FALSE])
-      beat()
-      out
-    }))
+    out <- vector("list", n)
+    for (i in seq_len(n)) {
+      out[[i]] <- runner(jobs[i, , drop = FALSE])
+      if (isFALSE(beat())) {
+        stop(abandoned("another worker completed this chunk while it ran"))
+      }
+    }
+    return(out)
   }
 
   # Within a worker, mirai parallelises across that machine's own cores. The
@@ -620,7 +668,12 @@ run_chunk <- function(project_dir, entrypoint, jobs, cores = 1L,
       # and long enough that an hour-long job costs only a few thousand
       # wake-ups on a machine that may be running on battery.
       Sys.sleep(min(1, heartbeat_seconds / 4))
-      beat()
+      if (isFALSE(beat())) {
+        # The tasks are already dispatched, so leaving them to finish would
+        # burn the cores of a machine that was donating them. mirai can cancel.
+        tryCatch(mirai::stop_mirai(m), error = function(e) NULL)
+        stop(abandoned("another worker completed this chunk while it ran"))
+      }
     }
   }
   results <- m[]

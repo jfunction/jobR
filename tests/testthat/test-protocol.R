@@ -533,3 +533,121 @@ test_that("the submit that finishes a jobset says so in its reply", {
                                  results = list(1)))
   expect_true(last$done)
 })
+
+
+# ---- offering results before uploading them ---------------------------------
+# A returning worker can be holding a lot of data. Uploading a result for a
+# chunk somebody else already finished spends bandwidth to achieve nothing,
+# which on a metered link is exactly what the spool was meant to avoid.
+
+test_that("the host wants chunks that are not done", {
+  h <- demo_host(n = 10, chunksize = 5)
+  t1 <- auth(h)
+  r <- handle_request(h, list(op = "offer", token = t1, chunks = c(1L, 2L)))
+  expect_true(r$ok)
+  expect_equal(sort(r$want), c(1L, 2L))
+})
+
+test_that("the host declines a chunk it already has", {
+  h <- demo_host(n = 10, chunksize = 5)
+  t1 <- auth(h)
+  cl <- handle_request(h, list(op = "claim", token = t1))
+  handle_request(h, list(op = "submit", token = t1, chunk = cl$chunk,
+                         results = list(1)))
+  r <- handle_request(h, list(op = "offer", token = t1, chunks = c(1L, 2L)))
+  expect_equal(r$want, 2L)
+})
+
+test_that("a leased but unfinished chunk is still wanted", {
+  # The worker holding it may die. Only completion makes an offer pointless.
+  h <- demo_host(n = 10, chunksize = 5)
+  t1 <- auth(h); t2 <- auth(h)
+  cl <- handle_request(h, list(op = "claim", token = t2))
+  r <- handle_request(h, list(op = "offer", token = t1, chunks = cl$chunk))
+  expect_equal(r$want, cl$chunk)
+})
+
+test_that("offering nonsense is refused quietly rather than erroring", {
+  h <- demo_host(n = 10, chunksize = 5)
+  t1 <- auth(h)
+  expect_equal(handle_request(h, list(op = "offer", token = t1,
+                                      chunks = integer()))$want, integer())
+  expect_equal(handle_request(h, list(op = "offer", token = t1,
+                                      chunks = c(99L, -1L, NA)))$want, integer())
+})
+
+test_that("offering requires authentication", {
+  h <- demo_host()
+  r <- handle_request(h, list(op = "offer", token = "nope", chunks = 1L))
+  expect_false(r$ok)
+})
+
+# ---- why a lease was lost ---------------------------------------------------
+# Finished by somebody else means every further second is wasted. Merely
+# reassigned means the worker holding it now might die too, and a finished
+# result can still be offered. Only the host can tell the two apart.
+
+test_that("a reassigned chunk reports reassigned", {
+  h <- demo_host(n = 10, chunksize = 5, lease_seconds = 10)
+  t1 <- auth(h); t2 <- auth(h)
+  cl <- handle_request(h, list(op = "claim", token = t1), now = 1000)
+  # t1's lease lapses and t2 takes it, while t1 is still computing.
+  handle_request(h, list(op = "claim", token = t2), now = 1100)
+  handle_request(h, list(op = "claim", token = t2), now = 1100)
+
+  r <- handle_request(h, list(op = "renew", token = t1, chunk = cl$chunk),
+                      now = 1110)
+  expect_false(r$ok)
+  expect_equal(r$reason, "reassigned")
+})
+
+test_that("a completed chunk reports done", {
+  h <- demo_host(n = 10, chunksize = 5, lease_seconds = 10)
+  t1 <- auth(h); t2 <- auth(h)
+  cl <- handle_request(h, list(op = "claim", token = t1), now = 1000)
+  handle_request(h, list(op = "submit", token = t2, chunk = cl$chunk,
+                         results = list(1)), now = 1100)
+
+  r <- handle_request(h, list(op = "renew", token = t1, chunk = cl$chunk),
+                      now = 1110)
+  expect_false(r$ok)
+  expect_equal(r$reason, "done")
+})
+
+# ---- handing a chunk back ---------------------------------------------------
+
+test_that("only the worker holding a lease may hand it back", {
+  # Without this a worker whose lease lapsed could reopen a chunk that now
+  # belongs to somebody else, taking it out from under a worker mid-compute.
+  h <- demo_host(n = 10, chunksize = 5, lease_seconds = 10)
+  t1 <- auth(h); t2 <- auth(h)
+  cl <- handle_request(h, list(op = "claim", token = t1), now = 1000)
+  # Two claims, because unattempted chunks go out first: t2's first claim takes
+  # the chunk nobody has tried, and only its second picks up t1's lapsed one.
+  handle_request(h, list(op = "claim", token = t2), now = 1100)
+  handle_request(h, list(op = "claim", token = t2), now = 1100)
+
+  # Inside t2's lease window: it runs to 1110, and chunk_state treats
+  # lease <= now as expired, so 1110 itself would read as open.
+  r <- handle_request(h, list(op = "fail", token = t1, chunk = cl$chunk),
+                      now = 1105)
+  expect_false(r$ok)
+
+  # Still t2's, not reopened.
+  st <- chunk_state(h$ledger, h$jobset, h$n_chunks, now = 1105)
+  expect_equal(st$state[cl$chunk], "leased")
+  expect_equal(st$worker[cl$chunk], substr(t2, 1, 8))
+})
+
+test_that("failing a chunk that is already done changes nothing", {
+  h <- demo_host(n = 10, chunksize = 5)
+  t1 <- auth(h)
+  cl <- handle_request(h, list(op = "claim", token = t1))
+  handle_request(h, list(op = "submit", token = t1, chunk = cl$chunk,
+                         results = list(1)))
+  before <- ledger_progress(h$ledger, h$jobset, h$n_chunks)
+
+  expect_false(handle_request(h, list(op = "fail", token = t1,
+                                      chunk = cl$chunk))$ok)
+  expect_equal(ledger_progress(h$ledger, h$jobset, h$n_chunks), before)
+})

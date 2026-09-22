@@ -24,7 +24,10 @@ run_chunk(
 \item{cores}{Local cores to spread the chunk across. 1 still uses a daemon.}
 
 \item{heartbeat}{Optional zero-argument function called periodically while
-the chunk runs, used by \code{\link[=jobr_join]{jobr_join()}} to renew its lease.}
+the chunk runs, used by \code{\link[=jobr_join]{jobr_join()}} to renew its lease. Returning
+\code{FALSE} from it abandons the chunk: the work is known to be pointless, and
+a \code{jobr_abandoned} condition is raised rather than an error, because
+nothing has gone wrong with this machine.}
 
 \item{heartbeat_seconds}{How often, at most, to call \code{heartbeat}.}
 
