@@ -39,6 +39,12 @@ NULL
 #'   moment is the normal condition on the networks this package is for, and
 #'   treating the first missed reply as the end of the run loses the machine
 #'   and whatever chunk it was holding. Set to 0 to give up immediately.
+#' @param max_chunk_seconds Stop renewing a chunk's lease once it has been
+#'   running this long. Because the lease is now renewed while a job runs, a
+#'   job that has hung looks exactly like one that is merely slow, and both
+#'   hold their chunk indefinitely. This is the cap on that. The default never
+#'   gives up, because only the person who wrote the jobs knows how long they
+#'   ought to take.
 #' @param use_host_packages When the host serves a package repository, fetch
 #'   missing packages from it rather than from CRAN. FALSE always uses CRAN.
 #' @param max_seconds Give up after this long.
@@ -51,7 +57,7 @@ jobr_join <- function(url, passphrase,
                       tls = NULL, cores = 1L, timeout_ms = 5000,
                       poll_seconds = 2, max_chunks = Inf, max_seconds = Inf,
                       max_failures = 5L, renew_seconds = NULL,
-                      reconnect_seconds = 60,
+                      reconnect_seconds = 60, max_chunk_seconds = Inf,
                       use_host_packages = TRUE, quiet = FALSE) {
   sock <- nanonext::socket("req", dial = url, tls = tls)
   on.exit(close(sock), add = TRUE)
@@ -176,17 +182,36 @@ jobr_join <- function(url, passphrase,
     message("project bundle already current, nothing to fetch")
   }
 
-  # mirai is Suggested, not required: it is only needed to spread a chunk
-  # across this machine's own cores. Discovering that at the point of running a
-  # chunk is far too late -- the chunk fails, is handed back, claimed again,
-  # and fails identically forever. Check it once, here, and carry on serially
-  # if it is absent, because a worker contributing one core is still a worker.
-  if (cores > 1L && !requireNamespace("mirai", quietly = TRUE)) {
-    message("cores = ", cores, " needs the 'mirai' package, which is not ",
-            "installed on this machine.\n",
-            "  running one job at a time instead. To use all ", cores,
-            " cores:  install.packages(\"mirai\")")
+  # mirai is Suggested, not required, and its absence costs more than cores.
+  # Jobs normally run in a daemon even on a single core, because that is what
+  # keeps this process free to renew the lease while a job is running. Without
+  # it the jobs run here, this process blocks inside run_job(), and a single
+  # job longer than the lease cannot be renewed -- the chunk is reissued and
+  # the work is done twice.
+  #
+  # Discovering that at the point of running a chunk is far too late: the chunk
+  # fails, is handed back, claimed again, and fails identically forever. Check
+  # once, here, and carry on regardless, because a worker that can only manage
+  # short jobs is still a worker.
+  if (!use_daemons()) {
+    if (isTRUE(getOption("jobR.in_process", FALSE))) {
+      if (!quiet) message("running jobs in this process by request; a single ",
+                          "job longer than the lease cannot renew it")
+    } else {
+      message("the 'mirai' package is not installed on this machine.\n",
+              "  Jobs will run one at a time in this process, and a single job ",
+              "longer than the\n  host's lease cannot be renewed, so its chunk ",
+              "may be reissued to someone else.\n",
+              "  To fix both:  install.packages(\"mirai\")")
+    }
     cores <- 1L
+  } else {
+    # Once per session rather than once per chunk. Spawning a daemon takes the
+    # better part of a second, which is nothing against an hour-long job and a
+    # great deal against a chunk of five short ones.
+    if (isTRUE(daemons_ensure(cores))) {
+      on.exit(mirai::daemons(0L, .compute = "jobr_local"), add = TRUE)
+    }
   }
 
   # Loaded once here so a broken entrypoint fails at join rather than being
@@ -245,7 +270,8 @@ jobr_join <- function(url, passphrase,
     }
 
     out <- tryCatch(run_chunk(project_dir, hi$entrypoint, cl$jobs, cores = cores,
-                              heartbeat = beat, heartbeat_seconds = every),
+                              heartbeat = beat, heartbeat_seconds = every,
+                              max_chunk_seconds = max_chunk_seconds),
                     error = function(e) e)
     if (inherits(out, "error")) {
       # Hand the chunk back rather than submitting a result that is really an
@@ -335,6 +361,43 @@ load_entrypoint <- function(project_dir, entrypoint) {
   get("run_job", envir = env)
 }
 
+#' Should jobs run in a daemon rather than in this process?
+#'
+#' Running them in a daemon is what lets a worker renew its lease while a
+#' single job is still running: the worker process itself never executes user
+#' code, so it is always free to talk to the host. The alternative, running
+#' jobs inline, blocks the only thread there is, and a job longer than the
+#' lease becomes unreachable.
+#'
+#' Set `options(jobR.in_process = TRUE)` to force jobs inline. That saves an R
+#' process on a machine short of memory, and it is how the fallback path is
+#' tested, but it reinstates the limit above.
+#'
+#' @return TRUE if mirai is available and in-process execution was not asked
+#'   for.
+#' @keywords internal
+use_daemons <- function() {
+  if (isTRUE(getOption("jobR.in_process", FALSE))) return(FALSE)
+  requireNamespace("mirai", quietly = TRUE)
+}
+
+#' Make sure the jobR daemons exist
+#'
+#' @param n How many daemons are wanted.
+#'
+#' @return TRUE if this call started them, and the caller should therefore stop
+#'   them; FALSE if they were already running. [jobr_join()] starts them once
+#'   for a whole session rather than paying the spawn cost on every chunk, and
+#'   this is how [run_chunk()] knows not to shut down someone else's.
+#' @keywords internal
+daemons_ensure <- function(n) {
+  st <- tryCatch(mirai::status(.compute = "jobr_local"), error = function(e) NULL)
+  live <- tryCatch(as.integer(st$connections)[1L], error = function(e) 0L)
+  if (isTRUE(live > 0L)) return(FALSE)
+  mirai::daemons(max(1L, as.integer(n)), .compute = "jobr_local")
+  TRUE
+}
+
 #' Run one chunk of jobs
 #'
 #' Takes the project rather than a loaded function, because a `run_job` closure
@@ -342,28 +405,36 @@ load_entrypoint <- function(project_dir, entrypoint) {
 #' in a fresh environment, so a closure's enclosing environment does not travel
 #' with it: `run_job` would arrive, but anything it was defined alongside --
 #' every helper in every other file the manifest lists -- would not. Each daemon
-#' therefore sources the project itself, exactly as a serial worker does.
+#' therefore sources the project itself.
+#'
+#' Jobs run in a daemon even when `cores` is 1. That looks like waste and is
+#' the entire point: see [use_daemons()].
 #'
 #' @param project_dir Unpacked project directory.
 #' @param entrypoint Relative path to the entrypoint, from the manifest.
 #' @param jobs A data frame of jobs.
-#' @param cores Local cores. 1 runs serially; more uses local mirai daemons.
+#' @param cores Local cores to spread the chunk across. 1 still uses a daemon.
 #' @param heartbeat Optional zero-argument function called periodically while
-#'   the chunk runs, used by [jobr_join()] to renew its lease. A worker is
-#'   single-threaded, so without somewhere to call from during a long chunk
-#'   there is no way to tell the host it is still alive.
+#'   the chunk runs, used by [jobr_join()] to renew its lease.
 #' @param heartbeat_seconds How often, at most, to call `heartbeat`.
+#' @param max_chunk_seconds Stop renewing once a chunk has been running this
+#'   long. Renewing while a job runs makes a hung job indistinguishable from a
+#'   slow one, and both keep the lease; this is the cap on that. The default
+#'   never gives up, because only the person who wrote the jobs knows how long
+#'   they ought to take.
 #'
 #' @return A list of per-row results, in row order.
 #' @export
 run_chunk <- function(project_dir, entrypoint, jobs, cores = 1L,
-                      heartbeat = NULL, heartbeat_seconds = 60) {
+                      heartbeat = NULL, heartbeat_seconds = 60,
+                      max_chunk_seconds = Inf) {
   n <- nrow(jobs)
   if (n == 0L) return(list())
 
   # Rate-limited so that a chunk of ten thousand fast jobs does not send ten
   # thousand renewals.
-  last_beat <- unix_time()
+  started   <- unix_time()
+  last_beat <- started
   beat <- function() {
     if (is.null(heartbeat)) return(invisible(NULL))
     if (unix_time() - last_beat < heartbeat_seconds) return(invisible(NULL))
@@ -371,20 +442,13 @@ run_chunk <- function(project_dir, entrypoint, jobs, cores = 1L,
     heartbeat()
   }
 
-  # mirai is Suggested. Degrade rather than fail: a machine without it can
-  # still contribute, just one job at a time. [jobr_join()] checks this once at
-  # join time so the warning is not repeated for every chunk.
-  if (cores > 1L && !requireNamespace("mirai", quietly = TRUE)) {
-    warning("'mirai' is not installed; running this chunk serially instead of ",
-            "on ", cores, " cores", call. = FALSE)
-    cores <- 1L
-  }
-
-  if (cores <= 1L) {
+  if (!use_daemons()) {
+    # No daemon, so the jobs run here and this process is blocked inside
+    # run_job() for as long as they take. Between jobs is then the only moment
+    # it can talk to the host, and a single job longer than the lease is out of
+    # reach -- which is the limitation daemons exist to remove. [jobr_join()]
+    # says so once, at join time, rather than once per chunk.
     runner <- load_entrypoint_cached(project_dir, entrypoint)
-    # Between jobs is the only point a serial worker is free to talk to the
-    # host. A single job longer than the lease is therefore still beyond reach;
-    # that is a limit of the chunk size chosen, not of the heartbeat.
     return(lapply(seq_len(n), function(i) {
       out <- runner(jobs[i, , drop = FALSE])
       beat()
@@ -395,8 +459,10 @@ run_chunk <- function(project_dir, entrypoint, jobs, cores = 1L,
   # Within a worker, mirai parallelises across that machine's own cores. The
   # division of labour is deliberate: jobR moves work between machines, mirai
   # moves it between cores.
-  mirai::daemons(as.integer(cores), .compute = "jobr_local")
-  on.exit(mirai::daemons(0L, .compute = "jobr_local"), add = TRUE)
+  owned <- daemons_ensure(cores)
+  if (isTRUE(owned)) {
+    on.exit(mirai::daemons(0L, .compute = "jobr_local"), add = TRUE)
+  }
 
   # `.args` supplies constants. mirai_map's `...` would instead iterate over
   # them in parallel with `.x`, the way Map() does -- passing the project there
@@ -438,10 +504,21 @@ run_chunk <- function(project_dir, entrypoint, jobs, cores = 1L,
   )
 
   # Collecting with m[] would block until the whole chunk finished, leaving no
-  # opportunity to renew. Poll instead, and beat while waiting.
+  # opportunity to renew. Poll instead, and beat while waiting. This is the one
+  # place a lease can be renewed *during* a job rather than between jobs, and
+  # it works only because the job is running in another process.
   if (!is.null(heartbeat)) {
     repeat {
       if (!any(as.logical(mirai::unresolved(m)))) break
+      if (unix_time() - started > max_chunk_seconds) {
+        warning("this chunk has run for more than ", max_chunk_seconds,
+                "s; no longer renewing its lease, so it may be reissued to ",
+                "another worker. A duplicate result is harmless.", call. = FALSE)
+        break
+      }
+      # A second is short enough that a finished chunk is submitted promptly,
+      # and long enough that an hour-long job costs only a few thousand
+      # wake-ups on a machine that may be running on battery.
       Sys.sleep(min(1, heartbeat_seconds / 4))
       beat()
     }

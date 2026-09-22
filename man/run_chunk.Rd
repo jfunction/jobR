@@ -10,7 +10,8 @@ run_chunk(
   jobs,
   cores = 1L,
   heartbeat = NULL,
-  heartbeat_seconds = 60
+  heartbeat_seconds = 60,
+  max_chunk_seconds = Inf
 )
 }
 \arguments{
@@ -20,14 +21,18 @@ run_chunk(
 
 \item{jobs}{A data frame of jobs.}
 
-\item{cores}{Local cores. 1 runs serially; more uses local mirai daemons.}
+\item{cores}{Local cores to spread the chunk across. 1 still uses a daemon.}
 
 \item{heartbeat}{Optional zero-argument function called periodically while
-the chunk runs, used by \code{\link[=jobr_join]{jobr_join()}} to renew its lease. A worker is
-single-threaded, so without somewhere to call from during a long chunk
-there is no way to tell the host it is still alive.}
+the chunk runs, used by \code{\link[=jobr_join]{jobr_join()}} to renew its lease.}
 
 \item{heartbeat_seconds}{How often, at most, to call \code{heartbeat}.}
+
+\item{max_chunk_seconds}{Stop renewing once a chunk has been running this
+long. Renewing while a job runs makes a hung job indistinguishable from a
+slow one, and both keep the lease; this is the cap on that. The default
+never gives up, because only the person who wrote the jobs knows how long
+they ought to take.}
 }
 \value{
 A list of per-row results, in row order.
@@ -38,5 +43,9 @@ cannot be sent to another process intact. mirai evaluates a mapped function
 in a fresh environment, so a closure's enclosing environment does not travel
 with it: \code{run_job} would arrive, but anything it was defined alongside --
 every helper in every other file the manifest lists -- would not. Each daemon
-therefore sources the project itself, exactly as a serial worker does.
+therefore sources the project itself.
+}
+\details{
+Jobs run in a daemon even when \code{cores} is 1. That looks like waste and is
+the entire point: see \code{\link[=use_daemons]{use_daemons()}}.
 }

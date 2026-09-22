@@ -17,6 +17,7 @@ jobr_join(
   max_failures = 5L,
   renew_seconds = NULL,
   reconnect_seconds = 60,
+  max_chunk_seconds = Inf,
   use_host_packages = TRUE,
   quiet = FALSE
 )
@@ -57,6 +58,13 @@ reply before concluding the host is really gone. A link that drops for a
 moment is the normal condition on the networks this package is for, and
 treating the first missed reply as the end of the run loses the machine
 and whatever chunk it was holding. Set to 0 to give up immediately.}
+
+\item{max_chunk_seconds}{Stop renewing a chunk's lease once it has been
+running this long. Because the lease is now renewed while a job runs, a
+job that has hung looks exactly like one that is merely slow, and both
+hold their chunk indefinitely. This is the cap on that. The default never
+gives up, because only the person who wrote the jobs knows how long they
+ought to take.}
 
 \item{use_host_packages}{When the host serves a package repository, fetch
 missing packages from it rather than from CRAN. FALSE always uses CRAN.}

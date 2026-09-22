@@ -146,16 +146,45 @@ request/reply in any case; and the loss tolerance that usually motivates UDP
 heartbeats is already provided by renewing at a third of the lease.
 
 The awkward part was that a worker is single-threaded: while computing a chunk
-it is inside `run_chunk()` and has no opportunity to speak. So `run_chunk()`
-takes a `heartbeat` callback and calls it between jobs when running serially,
-and while polling `mirai::unresolved()` when running across cores. Collecting
-the parallel results with `m[]` would have blocked until the whole chunk
-finished, leaving no such opportunity.
+it is inside `run_chunk()` and has no opportunity to speak. The first version
+called the `heartbeat` callback between jobs when running serially, and while
+polling `mirai::unresolved()` when running across cores. Collecting the
+parallel results with `m[]` would have blocked until the whole chunk finished,
+leaving no such opportunity.
 
-One limit remains, and it is inherent: a **single job** longer than the lease
-is still beyond reach, because there is no point between jobs at which to
-renew. That is a matter of choosing a chunk size and lease that suit the work,
-not something the heartbeat can fix.
+That left a hole exactly where it hurt most. A chunk of many short jobs kept
+its lease; a chunk containing **one long job** did not, because there is no
+"between jobs" to beat in. The long job is the one that needs the lease held —
+a sensitivity analysis whose single run takes minutes is the motivating case
+for this package, not an edge case.
+
+Calling it inherent was wrong. It was inherent only to running the job *in the
+worker process*. Jobs now go to a mirai daemon **even on a single core**, so
+the worker process never executes user code and is always free to renew. The
+polling path that already existed for multiple cores becomes the only path,
+and the hole closes. Measured on one four-second job with a half-second
+interval: one beat before, eight after.
+
+The costs are real and worth stating:
+
+- **An extra R process**, even for a one-core worker. On a memory-tight
+  machine `options(jobR.in_process = TRUE)` runs jobs inline again, with the
+  old limitation and a message saying so. The same switch is how the fallback
+  path is tested without uninstalling mirai.
+- **mirai matters more than it did.** It was Suggested and only needed for
+  `cores > 1`; now its absence also costs lease renewal during long jobs.
+  Still not Required — a worker that can only manage short jobs is still a
+  worker — but `jobr_join()` now says what is lost, once, at join time.
+- **A hung job is no longer distinguishable from a slow one.** Previously a
+  wedged job stopped beating and the lease lapsed, which reclaimed the chunk;
+  that was accidental, and it was also what broke long jobs. The replacement
+  is explicit: `max_chunk_seconds` stops renewing after a stated budget. It
+  defaults to no limit, because only the person who wrote the jobs knows how
+  long they ought to take.
+
+Daemons are started once per `jobr_join()` rather than once per chunk. Spawning
+one takes the better part of a second: nothing against an hour-long job, a
+great deal against a chunk of five short ones.
 
 ### Host-served package repository — landed
 
@@ -326,19 +355,15 @@ Different claims rest on different evidence, and they are not interchangeable.
 | Two physical machines over a LAN | One manual run, Windows to Windows |
 | Load-proportional distribution | **Not demonstrated.** Containers on one host all run at the same speed |
 | A bad link: 150ms +/- 50ms delay, 5% loss | `docker/docker-compose.netem.yml`: one worker behind `tc netem` took 18 of 40 chunks, 200 jobs exactly once |
+| A lease renewed during a single long job | Unit test counting beats through one 4s job: 1 in-process, 8 via a daemon. Integration test where one 12s job outlives a 4s lease with a rival waiting: the chunk is handed out twice in-process and once via a daemon -- run both ways, so the test is known to discriminate |
 | A link that goes dark mid-run | `docker-compose.partition.yml`: a worker survives a 25s total blackout and does 11 more chunks afterwards, with the other worker capped so nothing else could have |
 | Windows R 3.6 | **Not demonstrated.** CRAN ships no binary; needs Rtools 3.5 |
 
 ## Open, in rough priority order
 
-1. **A heartbeat that survives a long single job.** The current one renews
-   between jobs, so a job longer than the lease is still beyond reach. Needs
-   something that can renew while a call is in flight -- async, promises, or a
-   background process. Blocking for workloads with minutes-long jobs, such as
-   a model run inside a sensitivity analysis.
-2. **Progress and projected finish.** The ledger already has the timestamps.
-3. **Prefetched per-client queues**, if round trips ever start to matter.
-4. **Abort a chunk whose lease was lost.** A worker told it no longer holds the
+1. **Progress and projected finish.** The ledger already has the timestamps.
+2. **Prefetched per-client queues**, if round trips ever start to matter.
+3. **Abort a chunk whose lease was lost.** A worker told it no longer holds the
    lease currently finishes the chunk anyway; the submit is a harmless
    duplicate, but the work is wasted. Stopping early is easy serially and
    awkward across cores, where the tasks are already in flight.

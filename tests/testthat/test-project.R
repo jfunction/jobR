@@ -246,18 +246,6 @@ test_that("a multi-file project works across cores", {
   expect_equal(sort(do.call(rbind, out)$id), 1:4)
 })
 
-test_that("serial and parallel give the same answers", {
-  skip_if_not_installed("mirai")
-  skip_on_cran()
-  dir <- example_dir("montecarlo")
-  skip_if_not(dir.exists(dir))
-  jobs <- data.frame(id = 1:4, n = 2000, seed = 1:4)
-
-  serial <- do.call(rbind, run_chunk(dir, "R/run.R", jobs, cores = 1))
-  par    <- do.call(rbind, run_chunk(dir, "R/run.R", jobs, cores = 2))
-  expect_equal(serial, par)
-})
-
 test_that("a failing job raises an error instead of returning errorValues", {
   skip_if_not_installed("mirai")
   skip_on_cran()
@@ -316,4 +304,93 @@ test_that("a report skips the odd bad result but still reports", {
   res <- list(list(ok("alpha"), structure(-1L, class = "errorValue")))
   expect_warning(rep <- jobr_benchmark_report(res), "were skipped")
   expect_equal(rep$host, "alpha")
+})
+
+
+# ---- the heartbeat during a single long job ---------------------------------
+# The heartbeat used to fire only between jobs, so a chunk of many short jobs
+# kept its lease and a chunk containing one long job did not. That is backwards:
+# the long job is the one that needs the lease held. A worker is single-
+# threaded, so the only way out is for the job to run somewhere else -- which
+# is why jobs go to a daemon even on one core.
+
+slow_job_project <- function(dir, seconds) {
+  dir.create(file.path(dir, "R"), recursive = TRUE, showWarnings = FALSE)
+  writeLines(c(
+    "run_job <- function(row) {",
+    sprintf("  Sys.sleep(%f)", seconds),
+    "  data.frame(x = row$x, y = row$x * 2, stringsAsFactors = FALSE)",
+    "}"), file.path(dir, "R", "run.R"))
+  writeLines(c("Project: slow", "Entrypoint: R/run.R", "Files: R/run.R"),
+             file.path(dir, "jobR.dcf"))
+  dir
+}
+
+test_that("a single job longer than the interval is beaten through, not after", {
+  skip_if_not_installed("mirai")
+  skip_on_cran()
+  d <- slow_job_project(tempfile("proj-"), seconds = 3)
+
+  beats <- 0L
+  out <- run_chunk(d, "R/run.R", data.frame(x = 1L), cores = 1,
+                   heartbeat = function() beats <<- beats + 1L,
+                   heartbeat_seconds = 0.5)
+
+  expect_length(out, 1L)
+  # One job, three seconds, a beat wanted every half second. Beating only
+  # between jobs gives at most 1. The old code scored exactly that.
+  expect_gt(beats, 3L)
+})
+
+test_that("in-process execution cannot beat during a job, and says so", {
+  skip_on_cran()
+  d <- slow_job_project(tempfile("proj-"), seconds = 2)
+
+  # The fallback for a machine with no mirai, or one too short of memory to
+  # want a second R process. It is the old behaviour, and this pins the cost of
+  # it so that nobody mistakes the two paths for equivalent.
+  withr::with_options(list(jobR.in_process = TRUE), {
+    expect_false(use_daemons())
+    beats <- 0L
+    out <- run_chunk(d, "R/run.R", data.frame(x = 1L), cores = 1,
+                     heartbeat = function() beats <<- beats + 1L,
+                     heartbeat_seconds = 0.5)
+    expect_length(out, 1L)
+    expect_equal(beats, 1L)
+  })
+})
+
+test_that("a chunk that outstays max_chunk_seconds stops being renewed", {
+  skip_if_not_installed("mirai")
+  skip_on_cran()
+  d <- slow_job_project(tempfile("proj-"), seconds = 3)
+
+  # Renewing while a job runs means a hung job is indistinguishable from a slow
+  # one. This is the only thing that tells them apart, so it has to work.
+  beats <- 0L
+  expect_warning(
+    run_chunk(d, "R/run.R", data.frame(x = 1L), cores = 1,
+              heartbeat = function() beats <<- beats + 1L,
+              heartbeat_seconds = 0.25, max_chunk_seconds = 1),
+    "no longer renewing its lease")
+  expect_lt(beats, 8L)
+})
+
+test_that("results are the same whether a job runs here or in a daemon", {
+  skip_if_not_installed("mirai")
+  skip_on_cran()
+  dir <- example_dir("montecarlo")
+  skip_if_not(dir.exists(dir))
+  jobs <- data.frame(id = 1:4, n = 2000, seed = 1:4)
+
+  # Compares against running the project by hand, which is what a user would
+  # get and therefore the actual contract. Comparing run_chunk(cores = 1)
+  # against run_chunk(cores = 2) no longer tests anything, now that both go
+  # through a daemon -- and that comparison is what caught the RNG divergence
+  # in the first place, so it needs a replacement rather than a deletion.
+  runner <- load_entrypoint(dir, "R/run.R")
+  by_hand <- do.call(rbind, lapply(seq_len(nrow(jobs)),
+                                   function(i) runner(jobs[i, , drop = FALSE])))
+  expect_equal(by_hand, do.call(rbind, run_chunk(dir, "R/run.R", jobs, cores = 1)))
+  expect_equal(by_hand, do.call(rbind, run_chunk(dir, "R/run.R", jobs, cores = 2)))
 })

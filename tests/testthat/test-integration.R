@@ -561,3 +561,51 @@ test_that("the host does not vanish the moment the last chunk lands", {
   wait_until(function() !h$is_alive(), timeout = 30, what = "host to shut down")
   expect_equal(h$get_result(), "host-finished")
 })
+
+
+# ---- one job longer than the lease ------------------------------------------
+# The case the between-jobs heartbeat could never cover, and the one that
+# matters most: a sensitivity analysis whose single run takes minutes. The
+# existing lease tests all use many short jobs, so they were satisfied by
+# beating between them and would pass even with this broken.
+
+test_that("a single job longer than the lease keeps its chunk", {
+  skip_unless_integration()
+  skip_if_not_installed("mirai")
+  work <- tempfile("host-")
+  # One job of 12s against a 4s lease. Nothing happens between jobs, because
+  # there is no between.
+  proj <- write_slow_project(tempfile("proj-"), seconds = 12)
+  url <- test_url(); phrase <- "tango-uniform-victor-whiskey"
+
+  h <- start_host(work, proj, n_jobs = 1, chunksize = 1, url = url,
+                  phrase = phrase, lease = 4, max_seconds = 150)
+  on.exit(kill_quietly(h), add = TRUE)
+  await_host(h)
+
+  a <- bg(function(url, phrase, cache) {
+    jobr_join(url, phrase, cache_dir = cache, quiet = TRUE,
+              renew_seconds = 1, max_seconds = 140)
+  }, list(url = url, phrase = phrase, cache = tempfile("cache-")))
+  on.exit(kill_quietly(a), add = TRUE)
+
+  # A rival, as ever. With only one worker a lapsed lease goes unnoticed and
+  # the test would pass whether or not anything was renewed.
+  wait_until(function() nchar(paste(readLines(file.path(work, "ledger.tsv"),
+                                              warn = FALSE), collapse = "")) > 60,
+             timeout = 60, what = "the first worker to claim the chunk")
+  b <- bg(function(url, phrase, cache) {
+    jobr_join(url, phrase, cache_dir = cache, quiet = TRUE,
+              poll_seconds = 1, max_seconds = 140)
+  }, list(url = url, phrase = phrase, cache = tempfile("cache-")))
+  on.exit(kill_quietly(b), add = TRUE)
+
+  wait_until(function() !a$is_alive() && !b$is_alive(), timeout = 150,
+             what = "both workers to finish")
+
+  expect_equal(collected(work, "test"), serial_expectation(1), ignore_attr = TRUE)
+  # The assertion that discriminates. Renewing only between jobs leaves this
+  # chunk unrenewed for its whole 12 seconds, the lease lapses at 4, worker B
+  # takes it, and this becomes 2.
+  expect_equal(assigns_per_chunk(work, "test", 1), 1L)
+})
